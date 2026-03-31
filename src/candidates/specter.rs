@@ -30,7 +30,7 @@ use crate::engine::Engine;
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn neon_find_max_index(scores: &[f32; 256], start: usize, len: usize) -> usize {
+unsafe fn neon_find_max_index(scores: &[f32], start: usize, len: usize) -> usize {
     unsafe {
         let ptr = scores.as_ptr().add(start);
         let count = len - start;
@@ -51,7 +51,7 @@ unsafe fn neon_find_max_index(scores: &[f32; 256], start: usize, len: usize) -> 
 }
 
 #[inline]
-fn find_max_index(scores: &[f32; 256], start: usize, len: usize) -> usize {
+fn find_max_index(scores: &[f32], start: usize, len: usize) -> usize {
     if len <= start { return start; }
     #[cfg(target_arch = "aarch64")]
     { if len - start >= 4 { return unsafe { neon_find_max_index(scores, start, len) }; } }
@@ -133,22 +133,17 @@ static LMR: LazyLock<LmrTable> = LazyLock::new(|| {
 // ---------------------------------------------------------------------------
 
 struct MoveList {
-    moves: [Move; 256],
-    count: usize,
+    moves: Vec<Move>,
 }
 
 impl MoveList {
     fn new() -> Self {
         Self {
-            moves: [Move::default(); 256],
-            count: 0,
+            moves: Vec::with_capacity(256),
         }
     }
     fn push(&mut self, m: Move) {
-        if self.count < 256 {
-            self.moves[self.count] = m;
-            self.count += 1;
-        }
+        self.moves.push(m);
     }
 }
 
@@ -479,14 +474,14 @@ impl Specter {
     }
 
     fn order_moves(&self, pos: &Position, ml: &mut MoveList, ply: usize, ttm: &Move) {
-        let mut scores = [0.0f32; 256];
+        let mut scores = vec![0.0f32; ml.moves.len()];
         let cm = if self.prev_move.from != 0 || self.prev_move.to != 0 {
             self.countermove[self.prev_move.from as usize][self.prev_move.to as usize]
         } else {
             Move::default()
         };
 
-        for i in 0..ml.count {
+        for i in 0..ml.moves.len() {
             let m = &ml.moves[i];
             let s: f32;
             if *m == *ttm {
@@ -529,8 +524,8 @@ impl Specter {
         }
 
         // Selection sort with NEON-accelerated max finding
-        for i in 0..ml.count {
-            let best_idx = find_max_index(&scores, i, ml.count);
+        for i in 0..ml.moves.len() {
+            let best_idx = find_max_index(&scores, i, ml.moves.len());
             if best_idx != i { ml.moves.swap(i, best_idx); scores.swap(i, best_idx); }
         }
     }
@@ -622,7 +617,7 @@ impl Specter {
             self.move_buf = buf;
         }
 
-        if ml.count == 0 {
+        if ml.moves.len() == 0 {
             return if in_check { -99000 + ply } else { 0 };
         }
         self.order_moves(pos, &mut ml, ply as usize, &ttm);
@@ -632,7 +627,7 @@ impl Specter {
         let mut best_score = -100000i32;
         let mut flag: u8 = 1;
 
-        for i in 0..ml.count {
+        for i in 0..ml.moves.len() {
             if self.stopped {
                 break;
             }
@@ -757,8 +752,7 @@ impl Specter {
         buf.clear();
         generate_legal_moves(pos, &mut buf);
 
-        let mut tactical: [(Move, i32); 64] = [(Move::default(), 0); 64];
-        let mut nt = 0usize;
+        let mut tactical: Vec<(Move, i32)> = Vec::with_capacity(64);
         for m in &buf {
             let tac = !pos.board[m.to as usize].is_empty()
                 || m.special == SpecialMove::Promotion
@@ -773,23 +767,20 @@ impl Specter {
             if stand_pat + see + 200 < alpha {
                 continue;
             }
-            if nt < 64 {
-                tactical[nt] = (*m, see);
-                nt += 1;
-            }
+            tactical.push((*m, see));
         }
         self.move_buf = buf;
 
         // Sort tactical moves by SEE descending
-        for i in 0..nt {
-            for j in (i + 1)..nt {
+        for i in 0..tactical.len() {
+            for j in (i + 1)..tactical.len() {
                 if tactical[j].1 > tactical[i].1 {
                     tactical.swap(i, j);
                 }
             }
         }
 
-        for i in 0..nt {
+        for i in 0..tactical.len() {
             pos.make_move(&tactical[i].0);
             let score = -self.qsearch(pos, -beta, -alpha, qdepth + 1);
             pos.unmake_move();
@@ -866,7 +857,7 @@ impl Specter {
 
     fn dump_diag(&mut self, pos: &mut Position, root: &MoveList, stats: &mut SearchStats) {
         let mut ranked: Vec<(String, i32)> = Vec::new();
-        for i in 0..root.count {
+        for i in 0..root.moves.len() {
             let m = &root.moves[i];
             pos.make_move(m);
             let key = pos.zobrist;
@@ -960,10 +951,10 @@ impl Engine for Specter {
 
         let mut stats = SearchStats::default();
 
-        if root.count == 0 {
+        if root.moves.len() == 0 {
             return (Move::default(), stats);
         }
-        if root.count == 1 {
+        if root.moves.len() == 1 {
             stats.nodes = 1;
             stats.depth_reached = 0;
             return (root.moves[0], stats);
@@ -997,7 +988,7 @@ impl Engine for Specter {
                 iter_best_score = -100000;
 
                 // Order root moves: put previous iteration's best first
-                for i in 0..root.count {
+                for i in 0..root.moves.len() {
                     if root.moves[i] == best {
                         if i != 0 {
                             root.moves.swap(0, i);
@@ -1006,7 +997,7 @@ impl Engine for Specter {
                     }
                 }
 
-                for i in 0..root.count {
+                for i in 0..root.moves.len() {
                     if self.stopped {
                         break;
                     }
@@ -1080,7 +1071,7 @@ impl Engine for Specter {
         // Fallback for losing positions
         if best_score <= -90000 {
             let mut bs = -100000i32;
-            for i in 0..root.count {
+            for i in 0..root.moves.len() {
                 pos.make_move(&root.moves[i]);
                 let sc = -self.evaluate(pos);
                 pos.unmake_move();
@@ -1093,7 +1084,7 @@ impl Engine for Specter {
 
         // Root move validation
         let mut valid = false;
-        for i in 0..root.count {
+        for i in 0..root.moves.len() {
             if root.moves[i] == best {
                 valid = true;
                 break;

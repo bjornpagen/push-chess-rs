@@ -17,7 +17,7 @@ use crate::engine::Engine;
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn neon_find_max_index(scores: &[f32; 256], start: usize, len: usize) -> usize {
+unsafe fn neon_find_max_index(scores: &[f32], start: usize, len: usize) -> usize {
     unsafe {
         let ptr = scores.as_ptr().add(start);
         let count = len - start;
@@ -38,7 +38,7 @@ unsafe fn neon_find_max_index(scores: &[f32; 256], start: usize, len: usize) -> 
 }
 
 #[inline]
-fn find_max_index(scores: &[f32; 256], start: usize, len: usize) -> usize {
+fn find_max_index(scores: &[f32], start: usize, len: usize) -> usize {
     if len <= start { return start; }
     #[cfg(target_arch = "aarch64")]
     { if len - start >= 4 { return unsafe { neon_find_max_index(scores, start, len) }; } }
@@ -69,16 +69,15 @@ struct TTEntry {
 }
 
 struct MoveList {
-    moves: [Move; 256],
-    count: usize,
+    moves: Vec<Move>,
 }
 
 impl MoveList {
     fn new() -> Self {
-        Self { moves: [Move::default(); 256], count: 0 }
+        Self { moves: Vec::with_capacity(256) }
     }
     fn push(&mut self, m: Move) {
-        if self.count < 256 { self.moves[self.count] = m; self.count += 1; }
+        self.moves.push(m);
     }
 }
 
@@ -413,12 +412,12 @@ impl Phantom {
     }
 
     fn order_moves(&self, pos: &Position, ml: &mut MoveList, ply: usize, ttm: &Move) {
-        let mut scores = [0.0f32; 256];
+        let mut scores = vec![0.0f32; ml.moves.len()];
         let cm = if self.prev_move.from != 0 || self.prev_move.to != 0 {
             self.countermove[self.prev_move.from as usize][self.prev_move.to as usize]
         } else { Move::default() };
 
-        for i in 0..ml.count {
+        for i in 0..ml.moves.len() {
             let m = &ml.moves[i];
             let s;
             if *m == *ttm { s = 1e7; }
@@ -448,8 +447,8 @@ impl Phantom {
             scores[i] = s as f32;
         }
         // Selection sort with NEON-accelerated max finding
-        for i in 0..ml.count {
-            let best_idx = find_max_index(&scores, i, ml.count);
+        for i in 0..ml.moves.len() {
+            let best_idx = find_max_index(&scores, i, ml.moves.len());
             if best_idx != i { ml.moves.swap(i, best_idx); scores.swap(i, best_idx); }
         }
     }
@@ -507,7 +506,7 @@ impl Phantom {
             for i in 0..self.move_buf.len() { ml.push(self.move_buf[i]); }
         }
 
-        if ml.count == 0 { return if in_check { -99000 + ply } else { 0 }; }
+        if ml.moves.len() == 0 { return if in_check { -99000 + ply } else { 0 }; }
         self.order_moves(pos, &mut ml, ply as usize, &ttm);
 
         let saved_prev = self.prev_move;
@@ -516,7 +515,7 @@ impl Phantom {
         let mut flag: u8 = 1;
 
         let mut i = 0;
-        while i < ml.count && !self.stopped {
+        while i < ml.moves.len() && !self.stopped {
             let m = ml.moves[i];
 
             let is_tactical = !pos.board[m.to as usize].is_empty()
@@ -662,8 +661,7 @@ impl Phantom {
         self.move_buf.clear();
         generate_legal_moves(pos, &mut self.move_buf);
 
-        let mut tactical: [(Move, i32); 64] = [(Move::default(), 0); 64];
-        let mut nt = 0usize;
+        let mut tactical: Vec<(Move, i32)> = Vec::with_capacity(64);
         for idx in 0..self.move_buf.len() {
             let m = self.move_buf[idx];
             let tac = !pos.board[m.to as usize].is_empty()
@@ -673,15 +671,15 @@ impl Phantom {
             let see = pv(pos.board[m.to as usize].piece_type)
                 + if m.special == SpecialMove::Promotion { 800 } else { 0 };
             if stand_pat + see + 200 < alpha { continue; }
-            if nt < 64 { tactical[nt] = (m, see); nt += 1; }
+            tactical.push((m, see));
         }
-        for i in 0..nt {
-            for j in (i+1)..nt {
+        for i in 0..tactical.len() {
+            for j in (i+1)..tactical.len() {
                 if tactical[j].1 > tactical[i].1 { tactical.swap(i, j); }
             }
         }
 
-        for i in 0..nt {
+        for i in 0..tactical.len() {
             pos.make_move(&tactical[i].0);
             let score = -self.qsearch(pos, -beta, -alpha, qdepth + 1);
             pos.unmake_move();
@@ -727,7 +725,7 @@ impl Phantom {
 
     fn dump_diag(&mut self, pos: &mut Position, root: &MoveList) -> String {
         let mut ranked: Vec<(String, i32)> = Vec::new();
-        for i in 0..root.count {
+        for i in 0..root.moves.len() {
             let m = root.moves[i];
             pos.make_move(&m);
             let key = pos.zobrist;
@@ -788,8 +786,8 @@ impl Engine for Phantom {
 
         let mut stats = SearchStats::default();
 
-        if root.count == 0 { return (Move::default(), stats); }
-        if root.count == 1 {
+        if root.moves.len() == 0 { return (Move::default(), stats); }
+        if root.moves.len() == 1 {
             stats.nodes = 1; stats.depth_reached = 0;
             return (root.moves[0], stats);
         }
@@ -823,7 +821,7 @@ impl Engine for Phantom {
                 let k32 = (key >> 32) as u32;
                 if self.tt[idx].key32 == k32 {
                     let ttm = tt_to_move(&self.tt[idx]);
-                    for i in 0..root.count {
+                    for i in 0..root.moves.len() {
                         if root.moves[i] == ttm { best = ttm; break; }
                     }
                 }
@@ -835,7 +833,7 @@ impl Engine for Phantom {
         // Safety fallback
         if best_score <= -90000 {
             let mut bs = -100000;
-            for i in 0..root.count {
+            for i in 0..root.moves.len() {
                 pos.make_move(&root.moves[i]);
                 let sc = -self.evaluate(pos);
                 pos.unmake_move();
@@ -845,7 +843,7 @@ impl Engine for Phantom {
 
         // Validate
         let mut valid = false;
-        for i in 0..root.count {
+        for i in 0..root.moves.len() {
             if root.moves[i] == best { valid = true; break; }
         }
         if !valid { best = root.moves[0]; }

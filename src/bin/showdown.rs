@@ -958,7 +958,9 @@ fn run_tournament(
     std::thread::scope(|s| {
         let num_workers = max_concurrent.min(total);
         for _ in 0..num_workers {
-            s.spawn(|| {
+            std::thread::Builder::new()
+                .stack_size(8 * 1024 * 1024)
+                .spawn_scoped(s, || {
                 loop {
                     let idx = next_idx.fetch_add(1, Ordering::Relaxed);
                     if idx >= total {
@@ -1011,7 +1013,7 @@ fn run_tournament(
                         eprint!("\r  {}/{}", done, total);
                     }
                 }
-            });
+            }).unwrap();
         }
     });
 
@@ -1216,7 +1218,9 @@ fn run_standalone_match(
     std::thread::scope(|s| {
         let num_workers = max_concurrent.min(total);
         for _ in 0..num_workers {
-            s.spawn(|| {
+            std::thread::Builder::new()
+                .stack_size(8 * 1024 * 1024)
+                .spawn_scoped(s, || {
                 loop {
                     let idx = next_idx.fetch_add(1, Ordering::Relaxed);
                     if idx >= total {
@@ -1263,7 +1267,7 @@ fn run_standalone_match(
 
                     *outcomes[idx].lock().unwrap() = Some((outcome.result, sl.swap));
                 }
-            });
+            }).unwrap();
         }
     });
 
@@ -1352,7 +1356,9 @@ fn main() {
              \x20 {} <engine1> <engine2> <N> [budget_us] [db_path]                -- match\n\
              \x20 {} tournament <name> <budget_us> <games_per> e1 e2 [e3 ...]     -- tournament\n\
              \x20 {} standings [db_path]                                           -- standings\n\
+             \x20 {} purge-db [db_path]                                            -- delete db\n\
              Engines: {}",
+            args[0],
             args[0],
             args[0],
             args[0],
@@ -1366,6 +1372,27 @@ fn main() {
     }
 
     let mode = &args[1];
+
+    if mode == "purge-db" {
+        let db_path = if args.len() > 2 {
+            &args[2]
+        } else {
+            "pushchess.db"
+        };
+        let mut deleted = false;
+        for suffix in &["", "-shm", "-wal"] {
+            let path = format!("{}{}", db_path, suffix);
+            if std::path::Path::new(&path).exists() {
+                std::fs::remove_file(&path).expect(&format!("failed to delete {}", path));
+                eprintln!("Deleted {}", path);
+                deleted = true;
+            }
+        }
+        if !deleted {
+            eprintln!("No database found at {}", db_path);
+        }
+        std::process::exit(0);
+    }
 
     if mode == "standings" {
         let db_path = if args.len() > 2 {
