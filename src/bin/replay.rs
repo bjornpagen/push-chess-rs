@@ -16,7 +16,6 @@ struct MoveRecord {
     moving_piece: String,
     move_uci: String,
     captured: String,
-    special: String,
     depth: i32,
     eval_cp: i32,
     mat: i32,
@@ -38,7 +37,6 @@ struct GameInfo {
     termination: String,
     ply_count: i32,
     wall_time_ms: i32,
-    match_id: i32,
 }
 
 struct TournamentInfo {
@@ -170,7 +168,7 @@ fn load_games(conn: &Connection, tournament_id: i32) -> Vec<GameInfo> {
     if tournament_id > 0 {
         let mut stmt = conn.prepare(
             "SELECT g.game_id, g.white_id, g.black_id, g.result, g.termination, \
-             g.ply_count, g.wall_time_ms, g.match_id \
+             g.ply_count, g.wall_time_ms \
              FROM games g JOIN matches m ON g.match_id = m.match_id \
              WHERE m.tournament_id=?1 AND g.result<>'' \
              ORDER BY g.game_id"
@@ -185,13 +183,12 @@ fn load_games(conn: &Connection, tournament_id: i32) -> Vec<GameInfo> {
                 termination: row.get(4)?,
                 ply_count: row.get(5)?,
                 wall_time_ms: row.get(6)?,
-                match_id: row.get(7)?,
             })
         }).unwrap().filter_map(|r| r.ok()).collect()
     } else {
         let mut stmt = conn.prepare(
             "SELECT game_id, white_id, black_id, result, termination, \
-             ply_count, wall_time_ms, match_id \
+             ply_count, wall_time_ms \
              FROM games WHERE result<>'' ORDER BY game_id"
         ).unwrap();
 
@@ -204,7 +201,6 @@ fn load_games(conn: &Connection, tournament_id: i32) -> Vec<GameInfo> {
                 termination: row.get(4)?,
                 ply_count: row.get(5)?,
                 wall_time_ms: row.get(6)?,
-                match_id: row.get(7)?,
             })
         }).unwrap().filter_map(|r| r.ok()).collect()
     }
@@ -212,7 +208,7 @@ fn load_games(conn: &Connection, tournament_id: i32) -> Vec<GameInfo> {
 
 fn load_moves(conn: &Connection, game_id: i32) -> (Vec<MoveRecord>, String) {
     let mut stmt = conn.prepare(
-        "SELECT m.ply, m.side, m.moving_piece, m.move_uci, m.captured_piece, m.special, \
+        "SELECT m.ply, m.side, m.moving_piece, m.move_uci, m.captured_piece, \
          s.depth, s.eval_cp, p.material_balance, s.nodes, s.time_us, \
          m.legal_move_count, m.is_capture, m.is_promotion, \
          CASE WHEN m.side='white' THEN p2.in_check_black ELSE p2.in_check_white END, \
@@ -232,18 +228,17 @@ fn load_moves(conn: &Connection, game_id: i32) -> (Vec<MoveRecord>, String) {
             moving_piece: row.get(2)?,
             move_uci: row.get(3)?,
             captured: row.get(4)?,
-            special: row.get(5)?,
-            depth: row.get(6)?,
-            eval_cp: row.get(7)?,
-            mat: row.get(8)?,
-            nodes: row.get(9)?,
-            time_us: row.get(10)?,
-            legal_count: row.get(11)?,
-            is_capture: row.get::<_, i32>(12)? != 0,
-            is_promotion: row.get::<_, i32>(13)? != 0,
-            in_check_after: row.get::<_, i32>(14)? != 0,
-            fen_before: row.get(15)?,
-            fen_after: row.get(16)?,
+            depth: row.get(5)?,
+            eval_cp: row.get(6)?,
+            mat: row.get(7)?,
+            nodes: row.get(8)?,
+            time_us: row.get(9)?,
+            legal_count: row.get(10)?,
+            is_capture: row.get::<_, i32>(11)? != 0,
+            is_promotion: row.get::<_, i32>(12)? != 0,
+            in_check_after: row.get::<_, i32>(13)? != 0,
+            fen_before: row.get(14)?,
+            fen_after: row.get(15)?,
         })
     }).unwrap().filter_map(|r| r.ok()).collect();
 

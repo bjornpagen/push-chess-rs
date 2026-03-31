@@ -19,10 +19,46 @@
 
 use std::sync::LazyLock;
 use std::time::Instant;
+
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+
 use crate::core::types::*;
 use crate::core::position::Position;
 use crate::core::movegen::generate_legal_moves;
 use crate::engine::Engine;
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn neon_find_max_index(scores: &[f32; 256], start: usize, len: usize) -> usize {
+    unsafe {
+        let ptr = scores.as_ptr().add(start);
+        let count = len - start;
+        let chunks = count / 4;
+        let mut vmax = vld1q_f32(ptr);
+        for i in 1..chunks { vmax = vmaxq_f32(vmax, vld1q_f32(ptr.add(i * 4))); }
+        let mut max_val = vmaxvq_f32(vmax);
+        for i in (chunks * 4)..count { let v = *ptr.add(i); if v > max_val { max_val = v; } }
+        let target = vdupq_n_f32(max_val);
+        for i in 0..chunks {
+            let cmp = vceqq_f32(vld1q_f32(ptr.add(i * 4)), target);
+            let mask: [u32; 4] = std::mem::transmute(cmp);
+            for lane in 0..4 { if mask[lane] != 0 { return start + i * 4 + lane; } }
+        }
+        for i in (chunks * 4)..count { if *ptr.add(i) == max_val { return start + i; } }
+        start
+    }
+}
+
+#[inline]
+fn find_max_index(scores: &[f32; 256], start: usize, len: usize) -> usize {
+    if len <= start { return start; }
+    #[cfg(target_arch = "aarch64")]
+    { if len - start >= 4 { return unsafe { neon_find_max_index(scores, start, len) }; } }
+    let (mut best_idx, mut best_val) = (start, scores[start]);
+    for j in (start + 1)..len { if scores[j] > best_val { best_val = scores[j]; best_idx = j; } }
+    best_idx
+}
 
 // -----------------------------------------------------------------------
 // TT
@@ -481,20 +517,10 @@ impl Avalanche {
             scores[i] = s;
         }
 
-        // Selection sort
+        // Selection sort with NEON-accelerated max finding
         for i in 0..ml.count {
-            let mut best_idx = i;
-            let mut best_val = scores[i];
-            for j in (i + 1)..ml.count {
-                if scores[j] > best_val {
-                    best_val = scores[j];
-                    best_idx = j;
-                }
-            }
-            if best_idx != i {
-                ml.moves.swap(i, best_idx);
-                scores.swap(i, best_idx);
-            }
+            let best_idx = find_max_index(&scores, i, ml.count);
+            if best_idx != i { ml.moves.swap(i, best_idx); scores.swap(i, best_idx); }
         }
     }
 
