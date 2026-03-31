@@ -1,0 +1,20 @@
+[package]
+name = "push-chess"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+crossterm = "0.28"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+
+[[bin]]
+name = "showdown"
+path = "src/bin/showdown.rs"
+
+[[bin]]
+name = "replay"
+path = "src/bin/replay.rs"
