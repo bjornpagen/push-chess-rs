@@ -213,24 +213,15 @@ pub fn resolve_knight_push(
     let mut entries: [(Square, Square); 32] = [(0, 0); 32]; // (orig, current)
     let mut num_entries: i32 = 0;
 
-    // Process leg 1
+    // Process leg 1 — add all entries directly (no tracking).
+    // The cascade entries are independent pieces, not the mover chaining.
     for i in 0..leg1.num_displacements {
         let (f_sq, t_sq) = leg1.displacements[i as usize];
-        let mut found = false;
-        for j in 0..num_entries {
-            if entries[j as usize].1 == f_sq {
-                entries[j as usize].1 = t_sq;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            entries[num_entries as usize] = (f_sq, t_sq);
-            num_entries += 1;
-        }
+        entries[num_entries as usize] = (f_sq, t_sq);
+        num_entries += 1;
     }
 
-    // Process leg 2
+    // Process leg 2 — use tracking to update positions from leg 1
     for i in 0..leg2.num_displacements {
         let (f_sq, t_sq) = leg2.displacements[i as usize];
         let mut found = false;
