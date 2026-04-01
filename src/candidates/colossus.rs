@@ -383,6 +383,7 @@ impl Colossus {
         if self.check_time() { return 0; }
         self.nodes += 1;
         if ply as u32 > self.max_ply { self.max_ply = ply as u32; }
+        if ply >= 128 { return self.evaluate(pos); }
 
         alpha = alpha.max(-99000 + ply);
         beta = beta.min(99000 - ply - 1);

@@ -532,6 +532,9 @@ impl TempestEngine {
         if ply as u32 > self.max_ply {
             self.max_ply = ply as u32;
         }
+        if ply >= 128 {
+            return self.evaluate(pos);
+        }
 
         // Mate distance pruning
         alpha = alpha.max(-99000 + ply);
