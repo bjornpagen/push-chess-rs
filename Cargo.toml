@@ -23,3 +23,7 @@ path = "src/bin/replay.rs"
 [[bin]]
 name = "play"
 path = "src/bin/play.rs"
+
+[[bin]]
+name = "dump"
+path = "src/bin/dump.rs"

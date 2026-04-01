@@ -32,6 +32,11 @@ pub mod zenith;
 pub mod oblivion;
 pub mod apotheosis;
 pub mod terminus;
+pub mod hyperion;
+pub mod ozymandias;
+pub mod leviathan;
+pub mod chronos;
+pub mod eternity;
 
 use crate::engine::EngineEntry;
 
@@ -53,6 +58,11 @@ pub const ENGINE_REGISTRY: &[EngineEntry] = &[
     EngineEntry { name: "oblivion", create: oblivion::create },
     EngineEntry { name: "apotheosis", create: apotheosis::create },
     EngineEntry { name: "terminus", create: terminus::create },
+    EngineEntry { name: "hyperion", create: hyperion::create },
+    EngineEntry { name: "ozymandias", create: ozymandias::create },
+    EngineEntry { name: "leviathan", create: leviathan::create },
+    EngineEntry { name: "chronos", create: chronos::create },
+    EngineEntry { name: "eternity", create: eternity::create },
 ];
 
 pub fn find_engine(name: &str) -> Option<&'static EngineEntry> {

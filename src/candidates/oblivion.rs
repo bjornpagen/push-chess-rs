@@ -162,6 +162,7 @@ struct OblivionEngine {
     move_buf: Vec<Move>,
     nodes: u64, qnodes: u64, beta_cuts: u64, first_cuts: u64, tt_hits: u64,
     null_cuts: u64, lmr_tries: u64, lmr_re: u64, lazy_cuts: u64, max_ply: u32,
+    cut_hist: [u64; 6], cut_cap: u64, cut_push: u64, cut_quiet: u64, max_qdepth: u32,
     stopped: bool, budget_max_time_us: i64, t0: Instant,
 }
 
@@ -174,6 +175,7 @@ impl OblivionEngine {
             move_buf: Vec::new(),
             nodes: 0, qnodes: 0, beta_cuts: 0, first_cuts: 0, tt_hits: 0,
             null_cuts: 0, lmr_tries: 0, lmr_re: 0, lazy_cuts: 0, max_ply: 0,
+            cut_hist: [0; 6], cut_cap: 0, cut_push: 0, cut_quiet: 0, max_qdepth: 0,
             stopped: false, budget_max_time_us: 0, t0: Instant::now() }
     }
 
@@ -262,6 +264,76 @@ impl OblivionEngine {
             if bishop_count[ci] >= 2 { score += sign * 30; }
         }
         score
+    }
+
+    fn evaluate_with_terms(&self, pos: &Position) -> (i32, String) {
+        let stm = pos.side_to_move;
+        let mut mat_score = 0i32;
+        let mut pst_score = 0i32;
+        let mut xray_score = 0i32;
+        let mut king_score = 0i32;
+        let ek_sq = pos.king_sq[opponent(stm) as usize];
+        let ek_r = (ek_sq >> 3) as i32;
+        let ek_f = (ek_sq & 7) as i32;
+        let mut pawn_n = [0usize; 2];
+        let mut pawn_sq = [[0u8; 8]; 2];
+        let mut bishop_count = [0i32; 2];
+
+        for sq in 0u8..64 {
+            let p = pos.board[sq as usize];
+            if p.is_empty() { continue; }
+            let c = p.color;
+            let ci = c as usize;
+            let sign = if c == stm { 1 } else { -1 };
+            let pt = p.piece_type;
+            let r = (sq >> 3) as i32;
+            let f = (sq & 7) as i32;
+
+            mat_score += sign * pval(pt);
+            pst_score += sign * pst_value(pt, c, sq);
+
+            if pt == PieceType::Pawn {
+                if pawn_n[ci] < 8 { pawn_sq[ci][pawn_n[ci]] = sq; pawn_n[ci] += 1; }
+            } else if pt == PieceType::Bishop { bishop_count[ci] += 1; }
+
+            if c == stm && (pt == PieceType::Rook || pt == PieceType::Queen) {
+                if f == ek_f { xray_score += 20; }
+                if r == ek_r { xray_score += 20; }
+            }
+            if c == stm && (pt == PieceType::Bishop || pt == PieceType::Queen) {
+                if (r - ek_r).abs() == (f - ek_f).abs() { xray_score += 20; }
+            }
+        }
+
+        for ci in 0..2usize {
+            let c = if ci == 0 { Color::White } else { Color::Black };
+            let sign = if c == stm { 1 } else { -1 };
+            let kr = (pos.king_sq[ci] >> 3) as i32;
+            let kf = (pos.king_sq[ci] & 7) as i32;
+            let shield_dir: i32 = if c == Color::White { 1 } else { -1 };
+            for pi in 0..pawn_n[ci] {
+                let psq = pawn_sq[ci][pi] as i32;
+                let pr = psq >> 3; let pf = psq & 7;
+                let file_dist = (pf - kf).abs();
+                let rank_ahead = (pr - kr) * shield_dir;
+                if file_dist <= 1 && rank_ahead >= 1 && rank_ahead <= 2 { king_score += sign * 15; }
+            }
+            let mut pawns_near_king = 0;
+            for pi in 0..pawn_n[ci] {
+                let psq = pawn_sq[ci][pi] as i32;
+                let dist = ((psq >> 3) - kr).abs().max(((psq & 7) - kf).abs());
+                if dist <= 2 { pawns_near_king += 1; }
+            }
+            if pawns_near_king < 2 { king_score += sign * (-40); }
+            let mut has_pawn_on_file = false;
+            for pi in 0..pawn_n[ci] { if (pawn_sq[ci][pi] & 7) as i32 == kf { has_pawn_on_file = true; break; } }
+            if !has_pawn_on_file { king_score += sign * (-25); }
+            if bishop_count[ci] >= 2 { king_score += sign * 30; }
+        }
+
+        let total = mat_score + pst_score + xray_score + king_score;
+        let terms = format!("\"mat\":{},\"pst\":{},\"xray\":{},\"king\":{}", mat_score, pst_score, xray_score, king_score);
+        (total, terms)
     }
 
     fn order_moves(&self, pos: &Position, ml: &mut MoveList, ply: usize, ttm: &Move) {
@@ -425,6 +497,10 @@ impl OblivionEngine {
             if alpha >= beta {
                 flag = 2; self.beta_cuts += 1;
                 if i == 0 { self.first_cuts += 1; }
+                // Cut histogram
+                match i { 0 => self.cut_hist[0] += 1, 1 => self.cut_hist[1] += 1, 2 => self.cut_hist[2] += 1, 3 => self.cut_hist[3] += 1, 4..=7 => self.cut_hist[4] += 1, _ => self.cut_hist[5] += 1 }
+                // Cut type
+                if is_capture { self.cut_cap += 1; } else if is_push { self.cut_push += 1; } else { self.cut_quiet += 1; }
                 if !is_tactical && (ply as usize) < 64 {
                     self.killers[ply as usize][1] = self.killers[ply as usize][0];
                     self.killers[ply as usize][0] = m;
@@ -453,6 +529,7 @@ impl OblivionEngine {
     fn qsearch(&mut self, pos: &mut Position, mut alpha: i32, beta: i32, qdepth: i32) -> i32 {
         if self.check_time() { return 0; }
         self.nodes += 1; self.qnodes += 1;
+        let qd = qdepth as u32; if qd > self.max_qdepth { self.max_qdepth = qd; }
         if qdepth >= 4 { return self.evaluate(pos); }
 
         let stand_pat = self.evaluate(pos);
@@ -517,11 +594,19 @@ impl OblivionEngine {
         }
         ranked.sort_by(|a, b| b.1.cmp(&a.1));
         let cap = ranked.len().min(32);
+        let filled = self.tt.iter().filter(|e| e.key32 != 0).count();
+        let hashfull = (filled * 1000) / TT_SIZE;
+        let (_eval_total, eval_terms) = self.evaluate_with_terms(pos);
         let mut diag = format!(
             r#"{{"engine":"oblivion_001","qn":{},"tt":{},"bcut":{},"fcut":{},"nmp":{},"lmr":[{},{}],"top_moves":["#,
             self.qnodes, self.tt_hits, self.beta_cuts, self.first_cuts, self.null_cuts, self.lmr_tries, self.lmr_re);
         for i in 0..cap { if i > 0 { diag.push(','); } diag.push_str(&format!(r#"["{}",{}]"#, ranked[i].0, ranked[i].1)); }
-        diag.push_str("]}"); stats.diag_json = diag;
+        diag.push_str(&format!(
+            r#"],"cut_hist":[{},{},{},{},{},{}],"cut_types":{{"cap":{},"push":{},"quiet":{}}},"max_qdep":{},"hashfull":{},"eval_terms":{{{}}}}}"#,
+            self.cut_hist[0], self.cut_hist[1], self.cut_hist[2], self.cut_hist[3], self.cut_hist[4], self.cut_hist[5],
+            self.cut_cap, self.cut_push, self.cut_quiet,
+            self.max_qdepth, hashfull, eval_terms));
+        stats.diag_json = diag;
     }
 }
 
@@ -538,6 +623,7 @@ impl Engine for OblivionEngine {
         self.nodes = 0; self.qnodes = 0; self.max_ply = 0; self.stopped = false;
         self.beta_cuts = 0; self.first_cuts = 0; self.tt_hits = 0;
         self.null_cuts = 0; self.lmr_tries = 0; self.lmr_re = 0; self.lazy_cuts = 0;
+        self.cut_hist = [0; 6]; self.cut_cap = 0; self.cut_push = 0; self.cut_quiet = 0; self.max_qdepth = 0;
         self.prev_move = Move::default();
 
         let mut root = MoveList::new();
