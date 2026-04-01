@@ -82,7 +82,10 @@ fn derive_generation(name: &str) -> i32 {
         "wraith" | "nexus" | "vortex" | "ember" => 6,
         "razor" | "surge" | "blade" | "pulse" => 7,
         "prism" | "echo" | "warden" | "torrent" => 8,
-        _ => 9,
+        "apex" | "catalyst" | "dynamo" | "fortress" | "herald" | "inferno" | "juggernaut" | "knight_king" => 9,
+        "singularity" => 10,
+        "omega" | "zenith" => 11,
+        _ => 12,
     }
 }
 

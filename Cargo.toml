@@ -19,3 +19,7 @@ path = "src/bin/showdown.rs"
 [[bin]]
 name = "replay"
 path = "src/bin/replay.rs"
+
+[[bin]]
+name = "play"
+path = "src/bin/play.rs"

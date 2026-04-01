@@ -18,30 +18,41 @@ pub mod echo;
 pub mod warden;
 pub mod torrent;
 pub mod prism;
+pub mod catalyst;
+pub mod fortress;
+pub mod knight_king;
+pub mod inferno;
+pub mod apex;
+pub mod dynamo;
+pub mod juggernaut;
+pub mod herald;
+pub mod singularity;
+pub mod omega;
+pub mod zenith;
+pub mod oblivion;
+pub mod apotheosis;
+pub mod terminus;
 
 use crate::engine::EngineEntry;
 
+// Active roster: gen9_brawl top 9 + singularity + omega + zenith
 pub const ENGINE_REGISTRY: &[EngineEntry] = &[
-    EngineEntry { name: "chimera", create: chimera::create },
-    EngineEntry { name: "tempest", create: tempest::create },
-    EngineEntry { name: "colossus", create: colossus::create },
     EngineEntry { name: "phantom", create: phantom::create },
-    EngineEntry { name: "titan", create: titan::create },
-    EngineEntry { name: "specter", create: specter::create },
-    EngineEntry { name: "avalanche", create: avalanche::create },
-    EngineEntry { name: "flux", create: flux::create },
-    EngineEntry { name: "wraith", create: wraith::create },
-    EngineEntry { name: "ember", create: ember::create },
-    EngineEntry { name: "nexus", create: nexus::create },
-    EngineEntry { name: "vortex", create: vortex::create },
-    EngineEntry { name: "razor", create: razor::create },
-    EngineEntry { name: "surge", create: surge::create },
     EngineEntry { name: "blade", create: blade::create },
-    EngineEntry { name: "pulse", create: pulse::create },
-    EngineEntry { name: "echo", create: echo::create },
-    EngineEntry { name: "torrent", create: torrent::create },
-    EngineEntry { name: "warden", create: warden::create },
-    EngineEntry { name: "prism", create: prism::create },
+    EngineEntry { name: "ember", create: ember::create },
+    EngineEntry { name: "razor", create: razor::create },
+    EngineEntry { name: "singularity", create: singularity::create },
+    EngineEntry { name: "surge", create: surge::create },
+    EngineEntry { name: "chimera", create: chimera::create },
+    EngineEntry { name: "inferno", create: inferno::create },
+    EngineEntry { name: "vortex", create: vortex::create },
+    EngineEntry { name: "dynamo", create: dynamo::create },
+    EngineEntry { name: "fortress", create: fortress::create },
+    EngineEntry { name: "omega", create: omega::create },
+    EngineEntry { name: "zenith", create: zenith::create },
+    EngineEntry { name: "oblivion", create: oblivion::create },
+    EngineEntry { name: "apotheosis", create: apotheosis::create },
+    EngineEntry { name: "terminus", create: terminus::create },
 ];
 
 pub fn find_engine(name: &str) -> Option<&'static EngineEntry> {
