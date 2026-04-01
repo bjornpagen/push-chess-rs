@@ -78,7 +78,11 @@ fn derive_generation(name: &str) -> i32 {
     match name {
         "chimera" => 3,
         "tempest" | "colossus" | "phantom" => 4,
-        _ => 5,
+        "specter" | "avalanche" | "flux" | "titan" => 5,
+        "wraith" | "nexus" | "vortex" | "ember" => 6,
+        "razor" | "surge" | "blade" | "pulse" => 7,
+        "prism" | "echo" | "warden" | "torrent" => 8,
+        _ => 9,
     }
 }
 

@@ -17,6 +17,7 @@ pub struct UndoInfo {
     pub ep_square: Square,
     pub halfmove_clock: u16,
     pub zobrist: u64,
+    pub king_sq: [Square; 2],
 }
 
 impl Default for UndoInfo {
@@ -29,6 +30,7 @@ impl Default for UndoInfo {
             ep_square: 64,
             halfmove_clock: 0,
             zobrist: 0,
+            king_sq: [4, 60],
         }
     }
 }
@@ -308,6 +310,7 @@ impl Position {
         undo.ep_square = self.ep_square;
         undo.halfmove_clock = self.halfmove_clock;
         undo.zobrist = self.zobrist;
+        undo.king_sq = self.king_sq;
 
         let mover = self.board[m.from as usize];
         let us = self.side_to_move;
@@ -467,9 +470,14 @@ impl Position {
                 }
             }
 
-            // Update king position
-            if mover.piece_type == PieceType::King {
-                self.king_sq[us as usize] = m.to;
+            // Update king position — check ALL displacements, not just the mover,
+            // because push chains can displace kings of either side.
+            for di in 0..push_info.num_displacements {
+                let (_f_sq, t_sq) = push_info.displacements[di];
+                let placed = self.board[t_sq as usize];
+                if placed.piece_type == PieceType::King {
+                    self.king_sq[placed.color as usize] = t_sq;
+                }
             }
 
             // Update halfmove clock
@@ -549,11 +557,8 @@ impl Position {
             self.board[undo.changed[i].0 as usize] = undo.changed[i].1;
         }
 
-        // Restore king position
-        let mover = self.board[undo.mv.from as usize];
-        if mover.piece_type == PieceType::King {
-            self.king_sq[self.side_to_move as usize] = undo.mv.from;
-        }
+        // Restore king positions from saved state
+        self.king_sq = undo.king_sq;
 
         self.castling_rights = undo.castling_rights;
         self.ep_square = undo.ep_square;
