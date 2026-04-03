@@ -37,6 +37,8 @@ pub mod ozymandias;
 pub mod leviathan;
 pub mod chronos;
 pub mod eternity;
+pub mod void_engine;
+pub mod abyss;
 
 use crate::engine::EngineEntry;
 
@@ -63,6 +65,8 @@ pub const ENGINE_REGISTRY: &[EngineEntry] = &[
     EngineEntry { name: "leviathan", create: leviathan::create },
     EngineEntry { name: "chronos", create: chronos::create },
     EngineEntry { name: "eternity", create: eternity::create },
+    EngineEntry { name: "void", create: void_engine::create },
+    EngineEntry { name: "abyss", create: abyss::create },
 ];
 
 pub fn find_engine(name: &str) -> Option<&'static EngineEntry> {

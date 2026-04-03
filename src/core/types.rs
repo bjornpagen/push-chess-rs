@@ -75,6 +75,7 @@ impl Default for SearchStats {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[repr(C)]
 pub struct Piece {
     pub piece_type: PieceType,
     pub color: Color,

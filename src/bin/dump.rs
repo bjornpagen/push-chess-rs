@@ -176,49 +176,59 @@ fn main() {
         }
     }
 
-    // Diag JSON sample (first move per engine)
-    println!("\n=== DIAG SAMPLES ===");
+    // Full per-move data with all telemetry
+    println!("\n=== FULL MOVE DATA ===");
     {
         let sql = format!(
-            "SELECT mv.candidate_id, s.diag_json
-            FROM search s JOIN moves mv ON mv.move_id=s.move_id
-            JOIN games g ON g.game_id=mv.game_id
-            WHERE {} AND s.diag_json!='' AND mv.ply=0
-            GROUP BY mv.candidate_id ORDER BY mv.candidate_id", game_where);
-        let mut stmt = conn.prepare(&sql).unwrap();
-        let rows = stmt.query_map([], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?))).unwrap();
-        for r in rows {
-            let (e, dj) = r.unwrap();
-            println!("[{}] {}", e, dj);
-        }
-    }
-
-    // All moves for every game (dense format)
-    println!("\n=== MOVES ===");
-    {
-        let sql = format!(
-            "SELECT mv.game_id, mv.ply, mv.candidate_id, mv.move_uci, mv.moving_piece,
-                mv.captured_piece, s.eval_cp, s.depth, s.nodes
+            "SELECT mv.game_id, mv.ply, mv.side, mv.candidate_id, mv.move_uci, mv.moving_piece,
+                mv.captured_piece, mv.special, mv.is_capture, mv.is_promotion, mv.is_castle,
+                mv.is_en_passant, mv.is_knight_move, mv.legal_move_count,
+                mv.fen_before, mv.fen_after,
+                s.eval_cp, s.depth, s.seldepth, s.nodes, s.time_us, s.pv, s.diag_json
             FROM moves mv JOIN search s ON s.move_id=mv.move_id
             JOIN games g ON g.game_id=mv.game_id
             WHERE {}
             ORDER BY mv.game_id, mv.ply", game_where);
         let mut stmt = conn.prepare(&sql).unwrap();
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_,i32>(0)?, r.get::<_,i32>(1)?, r.get::<_,String>(2)?,
+            Ok((
+                r.get::<_,i32>(0)?,  r.get::<_,i32>(1)?,  r.get::<_,String>(2)?,
                 r.get::<_,String>(3)?, r.get::<_,String>(4)?, r.get::<_,String>(5)?,
-                r.get::<_,i32>(6)?, r.get::<_,i32>(7)?, r.get::<_,i64>(8)?))
+                r.get::<_,String>(6)?, r.get::<_,String>(7)?,
+                r.get::<_,i32>(8)?,  r.get::<_,i32>(9)?,  r.get::<_,i32>(10)?,
+                r.get::<_,i32>(11)?, r.get::<_,i32>(12)?, r.get::<_,i32>(13)?,
+                r.get::<_,String>(14)?, r.get::<_,String>(15)?,
+                r.get::<_,i32>(16)?, r.get::<_,i32>(17)?, r.get::<_,i32>(18)?,
+                r.get::<_,i64>(19)?, r.get::<_,i64>(20)?,
+                r.get::<_,String>(21)?, r.get::<_,String>(22)?,
+            ))
         }).unwrap();
         let mut last_gid = -1;
         for r in rows {
-            let (gid, ply, eng, uci, piece, cap, eval, depth, nodes) = r.unwrap();
+            let (gid, ply, side, eng, uci, piece, cap, special,
+                 is_cap, is_promo, is_castle, is_ep, is_knight, legal_count,
+                 fen_before, fen_after,
+                 eval, depth, seldepth, nodes, time_us, pv, diag) = r.unwrap();
             if gid != last_gid {
                 if last_gid != -1 { println!(); }
-                print!("g{}:", gid);
+                println!("=== GAME {} ===", gid);
                 last_gid = gid;
             }
-            let cap_str = if cap == "none" { "" } else { &cap };
-            print!(" {}{}{}({}d{}n{})", uci, if !cap_str.is_empty() { "x" } else { "" }, cap_str, eval, depth, nodes);
+            // Dense one-line format with all data
+            print!("p{} {} {} {} {}", ply, side, eng, uci, piece);
+            if cap != "none" { print!(" x{}", cap); }
+            if special != "none" { print!(" [{}]", special); }
+            print!(" | eval={} d={} sd={} n={} t={}us legal={}", eval, depth, seldepth, nodes, time_us, legal_count);
+            if !pv.is_empty() { print!(" pv={}", pv); }
+            println!();
+            if !diag.is_empty() && diag != "{}" {
+                println!("  diag: {}", diag);
+            }
+            // Print FENs for first and last ply of each game
+            if ply == 0 {
+                println!("  fen_before: {}", fen_before);
+            }
+            println!("  fen_after: {}", fen_after);
         }
         println!();
     }
