@@ -33,6 +33,8 @@ Moves must leave the moving side's king safe.
 - `src/bin/train_cataclysm.rs`: reproducible, outcome-only neural training in Rust.
 - `src/bin/evolve.rs`: bounded self-play, warm-start training, and held-out
   promotion gates; never automatically replaces the deployed model.
+- `src/bin/collect.rs`: resumable mixed-opponent training-data collection,
+  frozen artifacts, exact replay audits, and opening-family validation splits.
 - `tests/core_tests.rs`: 23 tests of the shared rules and board operations.
 
 ## Run
@@ -187,6 +189,11 @@ and Eternity. This was not a full round robin. Three subsequent self-play
 generations produced no reliable improvement, so the original model remains
 deployed. See [the Cataclysm report](docs/cataclysm-debut.md) for the complete
 results, rejected candidates, and fingerprints.
+
+For the next model, the [corpus plan](docs/cataclysm-corpus.md) collects 8,192 new
+games with varied openings, strong opponents and larger search budgets, after
+the full tournament finishes. Evaluation games remain separate; no model is
+automatically trained or promoted from the resulting data.
 
 Omit the engine list to run a full-roster tournament. Random legal openings
 are paired identically with colors reversed; all opening moves remain logged.

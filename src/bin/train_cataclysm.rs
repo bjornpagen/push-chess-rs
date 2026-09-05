@@ -169,6 +169,39 @@ fn fingerprint(bytes: &[u8]) -> u64 {
 
 type TrainingData = ([Vec<Sample>; 2], String);
 
+/// Run directories resolve only to fully audited shards in the collector's
+/// catalog. Interrupted/retried shards and tournament databases are not globbed.
+fn expand_databases(paths: &[String]) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut databases = Vec::new();
+    for path in paths {
+        let dir = std::path::Path::new(path);
+        if !dir.is_dir() {
+            databases.push(path.clone());
+            continue;
+        }
+        let catalog =
+            Connection::open_with_flags(dir.join("catalog.db"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut query =
+            catalog.prepare("SELECT database FROM batches WHERE status='finished' ORDER BY id")?;
+        for shard in query.query_map([], |r| r.get::<_, String>(0))? {
+            let shard = shard?;
+            if std::path::Path::new(&shard).components().count() != 1 || !shard.ends_with(".db") {
+                return Err("invalid shard filename in corpus catalog".into());
+            }
+            databases.push(
+                dir.join(shard)
+                    .to_str()
+                    .ok_or("non-UTF8 shard path")?
+                    .to_owned(),
+            );
+        }
+    }
+    if databases.is_empty() {
+        return Err("no completed training databases found".into());
+    }
+    Ok(databases)
+}
+
 fn load(paths: &[String], max_game: i64) -> Result<TrainingData, Box<dyn std::error::Error>> {
     let mut splits: [BTreeMap<String, (f32, usize)>; 2] = [BTreeMap::new(), BTreeMap::new()];
     let mut games = HashSet::new();
@@ -176,18 +209,27 @@ fn load(paths: &[String], max_game: i64) -> Result<TrainingData, Box<dyn std::er
     let mut visited = 0;
     for path in paths {
         let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let mut query = db.prepare(
-            "SELECT game_id,result,termination FROM games WHERE game_id<=?1 ORDER BY game_id",
+        let audited: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='corpus_audit')",
+            [],
+            |r| r.get(0),
         )?;
+        let mut query = db.prepare(if audited {
+            "SELECT g.game_id,result,termination,a.split FROM games g JOIN corpus_audit a USING(game_id)
+             WHERE game_id<=?1 AND accepted=1 ORDER BY game_id"
+        } else {
+            "SELECT game_id,result,termination,NULL FROM games WHERE game_id<=?1 ORDER BY game_id"
+        })?;
         let records = query.query_map([max_game], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
             ))
         })?;
         for record in records {
-            let (id, result, end) = record?;
+            let (id, result, end, corpus_split) = record?;
             let target = match result.as_str() {
                 "1-0" => 1.,
                 "0-1" => 0.,
@@ -205,7 +247,7 @@ fn load(paths: &[String], max_game: i64) -> Result<TrainingData, Box<dyn std::er
             {
                 continue;
             }
-            let mut query=db.prepare("SELECT fen_before,fen_after,move_from,move_to,path_kind,promo_piece FROM moves WHERE game_id=?1 ORDER BY ply")?;
+            let mut query=db.prepare("SELECT fen_before,fen_after,move_from,move_to,path_kind,promo_piece,COALESCE(s.nodes,0),COALESCE(s.diag_json,'') FROM moves m LEFT JOIN search s USING(move_id) WHERE game_id=?1 ORDER BY ply")?;
             let rows = query
                 .query_map([id], |r| {
                     Ok((
@@ -218,6 +260,8 @@ fn load(paths: &[String], max_game: i64) -> Result<TrainingData, Box<dyn std::er
                             r.get::<_, i64>(4)?,
                             r.get::<_, String>(5)?
                         ),
+                        r.get::<_, u64>(6)?,
+                        r.get::<_, String>(7)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -226,15 +270,23 @@ fn load(paths: &[String], max_game: i64) -> Result<TrainingData, Box<dyn std::er
             }
             let signature = rows
                 .iter()
-                .map(|(fen, mv)| format!("{fen}:{mv}\n"))
+                .map(|(fen, mv, _, _)| format!("{fen}:{mv}\n"))
                 .collect::<String>();
             if !games.insert(signature.clone()) {
                 continue;
             }
-            let split = usize::from(fingerprint(signature.as_bytes()).is_multiple_of(5));
+            let split = match corpus_split.as_deref() {
+                Some("train") => 0,
+                Some("validation") => 1,
+                None => usize::from(fingerprint(signature.as_bytes()).is_multiple_of(5)),
+                Some(other) => return Err(format!("invalid corpus split: {other}").into()),
+            };
             counts[split] += 1;
             let n = rows.len();
-            for (i, (fen, _)) in rows.into_iter().enumerate() {
+            for (i, (fen, _, nodes, diag)) in rows.into_iter().enumerate() {
+                if audited && (nodes == 0 || diag == "{\"opening\":true}") {
+                    continue;
+                }
                 let key = fen.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
                 let confidence = 0.45 + 0.55 * i as f32 / n as f32;
                 let label = 0.5 + confidence * (target - 0.5);
@@ -289,7 +341,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if databases.is_empty() {
         return Err("at least one training database is required".into());
     }
-    let ([train, valid], info) = load(databases, max_game)?;
+    let databases = expand_databases(databases)?;
+    let ([train, valid], info) = load(&databases, max_game)?;
     if train.is_empty() || valid.is_empty() {
         return Err("both training and held-out sets must be nonempty".into());
     }
@@ -361,7 +414,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (bytes, quantized) = best.2.quantized();
     std::fs::write(&args[0], &bytes)?;
     let report = format!(
-        "{{\n{info},\n\"seed\":20260905,\"max_game\":{max_game},\"hidden\":{WIDTH},\"bytes\":{},\"model_fnv1a64\":\"{:016x}\",\n\"baseline_validation_cross_entropy\":{baseline},\"selected_validation_cross_entropy\":{},\"quantized_validation_cross_entropy\":{},\"selected_epoch\":{},\n\"labels\":\"smoothed final outcome only\",\"split\":\"FNV-1a whole-game signature modulo five, with duplicate games and overlapping validation positions removed\",\n\"epochs\":[{history}]\n}}\n",
+        "{{\n{info},\n\"seed\":20260905,\"max_game\":{max_game},\"hidden\":{WIDTH},\"bytes\":{},\"model_fnv1a64\":\"{:016x}\",\n\"baseline_validation_cross_entropy\":{baseline},\"selected_validation_cross_entropy\":{},\"quantized_validation_cross_entropy\":{},\"selected_epoch\":{},\n\"labels\":\"smoothed final outcome only\",\"split\":\"audited corpus opening families, otherwise FNV-1a whole-game signature modulo five; duplicate games and overlapping validation positions removed\",\n\"epochs\":[{history}]\n}}\n",
         bytes.len(),
         fingerprint(&bytes),
         best.0,
@@ -379,6 +432,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audited_corpus_filters_rejections_and_openings_and_preserves_splits() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "push-chess-corpus-split-{}-{stamp}.db",
+            std::process::id()
+        ));
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE games(game_id,result,termination);
+            CREATE TABLE moves(move_id,game_id,ply,fen_before,fen_after,move_from,move_to,path_kind,promo_piece);
+            CREATE TABLE search(move_id,nodes,diag_json);
+            CREATE TABLE corpus_audit(game_id,accepted,split);
+            INSERT INTO games VALUES(1,'1-0','checkmate'),(2,'0-1','checkmate'),(3,'1-0','checkmate');
+            INSERT INTO corpus_audit VALUES(1,1,'train'),(2,1,'validation'),(3,0,'train');
+            INSERT INTO moves VALUES
+              (1,1,0,'7k/8/8/8/8/3P4/8/K7 w - - 0 1','opening',0,1,0,'none'),
+              (2,1,1,'7k/8/8/8/3P4/8/8/K7 b - - 0 1','train',0,1,0,'none'),
+              (3,2,0,'7k/8/8/8/8/3P4/8/K7 w - - 0 1','opening',0,1,0,'none'),
+              (4,2,1,'7k/8/8/8/4P3/8/8/K7 b - - 0 1','valid',0,1,0,'none'),
+              (5,3,0,'7k/8/8/8/5P2/8/8/K7 b - - 0 1','reject',0,1,0,'none');
+            INSERT INTO search VALUES(1,0,'{\"opening\":true}'),(2,100,'{}'),
+              (3,0,'{\"opening\":true}'),(4,100,'{}'),(5,100,'{}');").unwrap();
+        drop(db);
+        let ([train, valid], info) = load(&[path.to_str().unwrap().to_owned()], i64::MAX).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(train.len(), 1);
+        assert_eq!(valid.len(), 1);
+        assert!(info.contains("\"games\": [1, 1]"));
+        assert!(info.contains("\"visited_move_rows\": 2"));
+        assert!(train[0].target > 0.5);
+        assert!(valid[0].target < 0.5);
+    }
+
     #[test]
     fn analytic_gradient_matches_finite_difference() {
         let sample = Sample::from_fen("7k/8/8/8/3P4/8/8/K7 w - - 0 1", 0.8);
