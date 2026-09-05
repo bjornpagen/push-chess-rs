@@ -1,13 +1,13 @@
-use push_chess::core::types::*;
-use push_chess::core::position::{Position, start_position};
+use push_chess::candidates::{ENGINE_REGISTRY, find_engine};
 use push_chess::core::movegen::generate_legal_moves;
+use push_chess::core::position::{Position, start_position};
+use push_chess::core::types::*;
 use push_chess::engine::Engine;
-use push_chess::candidates::{find_engine, ENGINE_REGISTRY};
 
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 // ============================================================================
@@ -66,12 +66,7 @@ fn move_uci(m: &Move) -> String {
 }
 
 fn pv_string(stats: &SearchStats) -> String {
-    stats
-        .pv
-        .iter()
-        .map(|m| move_uci(m))
-        .collect::<Vec<_>>()
-        .join(" ")
+    stats.pv.iter().map(move_uci).collect::<Vec<_>>().join(" ")
 }
 
 fn derive_generation(name: &str) -> i32 {
@@ -82,7 +77,8 @@ fn derive_generation(name: &str) -> i32 {
         "wraith" | "nexus" | "vortex" | "ember" => 6,
         "razor" | "surge" | "blade" | "pulse" => 7,
         "prism" | "echo" | "warden" | "torrent" => 8,
-        "apex" | "catalyst" | "dynamo" | "fortress" | "herald" | "inferno" | "juggernaut" | "knight_king" => 9,
+        "apex" | "catalyst" | "dynamo" | "fortress" | "herald" | "inferno" | "juggernaut"
+        | "knight_king" => 9,
         "singularity" => 10,
         "omega" | "zenith" => 11,
         _ => 12,
@@ -442,9 +438,11 @@ fn play_game(
         ensure_position(&conn, &pos);
         let move_count = legal.len() as i32;
 
-        let mut budget = SearchBudget::default();
-        budget.max_time_us = budget_us;
-        budget.seed = game_seed ^ (ply as u64);
+        let budget = SearchBudget {
+            max_time_us: budget_us,
+            seed: game_seed ^ (ply as u64),
+            ..SearchBudget::default()
+        };
 
         let eng: &mut dyn Engine = if stm == Color::White {
             white_engine
@@ -470,7 +468,7 @@ fn play_game(
         }
 
         // Validate move
-        let ok = legal.iter().any(|m| *m == chosen);
+        let ok = legal.contains(&chosen);
         if !ok {
             out.result = if stm == Color::White {
                 GameResult::BlackWin
@@ -623,11 +621,7 @@ struct EloEntry {
     description: String,
 }
 
-fn compute_elo(
-    conn: &Connection,
-    generation: i32,
-    engine_set: &[String],
-) -> HashMap<String, f64> {
+fn compute_elo(conn: &Connection, generation: i32, engine_set: &[String]) -> HashMap<String, f64> {
     let mut rating: HashMap<String, f64> = HashMap::new();
 
     if generation >= 0 {
@@ -774,19 +768,12 @@ fn print_standings(conn: &Connection) {
 
         println!("\n=== Generation {} ===", generation);
         println!(
-            "{:<12}  {:>7}  {:>5}  {:>4}  {:>4}  {:>4}  {:>6}  {}",
-            "Engine", "Elo", "Games", "W", "D", "L", "Score", "Description"
+            "{:<12}  {:>7}  {:>5}  {:>4}  {:>4}  {:>4}  {:>6}  Description",
+            "Engine", "Elo", "Games", "W", "D", "L", "Score"
         );
         println!(
-            "{:<12}  {:>7}  {:>5}  {:>4}  {:>4}  {:>4}  {:>6}  {}",
-            "------------",
-            "-------",
-            "-----",
-            "----",
-            "----",
-            "----",
-            "------",
-            "-----------"
+            "{:<12}  {:>7}  {:>5}  {:>4}  {:>4}  {:>4}  {:>6}  -----------",
+            "------------", "-------", "-----", "----", "----", "----", "------"
         );
 
         for e in &entries {
@@ -865,11 +852,7 @@ fn run_tournament(
         "  {} engines, {} pairings x {} games = {} total games ({} concurrent)",
         n, pairings, games_per, total_games, max_concurrent
     );
-    println!(
-        "  Budget: {}ms | DB: {}\n",
-        budget_us / 1000,
-        db_path
-    );
+    println!("  Budget: {}ms | DB: {}\n", budget_us / 1000, db_path);
 
     // Pre-create all matches and game rows
     let mut all_games: Vec<TourneyGame> = Vec::with_capacity(total_games);
@@ -902,16 +885,8 @@ fn run_tournament(
                     .wrapping_mul(6364136223846793005u64)
                     .wrapping_add(1442695040888963407u64);
                 let swap = g % 2 == 1;
-                let wid = if swap {
-                    ids[j].clone()
-                } else {
-                    ids[i].clone()
-                };
-                let bid = if swap {
-                    ids[i].clone()
-                } else {
-                    ids[j].clone()
-                };
+                let wid = if swap { ids[j].clone() } else { ids[i].clone() };
+                let bid = if swap { ids[i].clone() } else { ids[j].clone() };
 
                 conn.execute(
                     "INSERT INTO games (match_id, game_num, seed, white_id, black_id) VALUES (?1,?2,?3,?4,?5)",
@@ -959,8 +934,7 @@ fn run_tournament(
         })
         .collect();
 
-    let results: Vec<Mutex<Option<GameOutcome>>> =
-        (0..total).map(|_| Mutex::new(None)).collect();
+    let results: Vec<Mutex<Option<GameOutcome>>> = (0..total).map(|_| Mutex::new(None)).collect();
 
     std::thread::scope(|s| {
         let num_workers = max_concurrent.min(total);
@@ -968,59 +942,60 @@ fn run_tournament(
             std::thread::Builder::new()
                 .stack_size(8 * 1024 * 1024)
                 .spawn_scoped(s, || {
-                loop {
-                    let idx = next_idx.fetch_add(1, Ordering::Relaxed);
-                    if idx >= total {
-                        break;
-                    }
+                    loop {
+                        let idx = next_idx.fetch_add(1, Ordering::Relaxed);
+                        if idx >= total {
+                            break;
+                        }
 
-                    let gi = &game_infos[idx];
+                        let gi = &game_infos[idx];
 
-                    let we = find_engine(&gi.wid).expect("engine not found");
-                    let be = find_engine(&gi.bid).expect("engine not found");
-                    let mut white_eng = (we.create)();
-                    let mut black_eng = (be.create)();
+                        let we = find_engine(&gi.wid).expect("engine not found");
+                        let be = find_engine(&gi.bid).expect("engine not found");
+                        let mut white_eng = (we.create)();
+                        let mut black_eng = (be.create)();
 
-                    let outcome = play_game(
-                        white_eng.as_mut(),
-                        &gi.wid,
-                        black_eng.as_mut(),
-                        &gi.bid,
-                        gi.seed,
-                        budget_us,
-                        db_path,
-                        gi.game_id,
-                        &print_mu,
-                    );
-
-                    // Update game result in DB
-                    let gdb =
-                        Connection::open(db_path).expect("failed to open db for result update");
-                    gdb.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
-                        .ok();
-                    gdb.execute(
-                        "UPDATE games SET result=?1, termination=?2, ply_count=?3, \
-                         final_fen=?4, wall_time_ms=?5 WHERE game_id=?6",
-                        params![
-                            result_str(outcome.result),
-                            outcome.termination,
-                            outcome.ply_count,
-                            outcome.final_fen,
-                            outcome.wall_time_ms,
+                        let outcome = play_game(
+                            white_eng.as_mut(),
+                            &gi.wid,
+                            black_eng.as_mut(),
+                            &gi.bid,
+                            gi.seed,
+                            budget_us,
+                            db_path,
                             gi.game_id,
-                        ],
-                    )
-                    .expect("failed to update game result");
+                            &print_mu,
+                        );
 
-                    *results[idx].lock().unwrap() = Some(outcome);
+                        // Update game result in DB
+                        let gdb =
+                            Connection::open(db_path).expect("failed to open db for result update");
+                        gdb.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+                            .ok();
+                        gdb.execute(
+                            "UPDATE games SET result=?1, termination=?2, ply_count=?3, \
+                         final_fen=?4, wall_time_ms=?5 WHERE game_id=?6",
+                            params![
+                                result_str(outcome.result),
+                                outcome.termination,
+                                outcome.ply_count,
+                                outcome.final_fen,
+                                outcome.wall_time_ms,
+                                gi.game_id,
+                            ],
+                        )
+                        .expect("failed to update game result");
 
-                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                    {
-                        let _lk = print_mu.lock().unwrap();
-                        eprint!("\r  {}/{}", done, total);
+                        *results[idx].lock().unwrap() = Some(outcome);
+
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        {
+                            let _lk = print_mu.lock().unwrap();
+                            eprint!("\r  {}/{}", done, total);
+                        }
                     }
-                }
-            }).unwrap();
+                })
+                .unwrap();
         }
     });
 
@@ -1093,14 +1068,7 @@ fn run_tournament(
     for e in &entries {
         println!(
             "{:<12}  {:>3}  {:>7.1}  {:>5}  {:>4}  {:>4}  {:>4}  {:>5.1}%",
-            e.candidate_id,
-            e.generation,
-            e.elo,
-            e.games,
-            e.wins,
-            e.draws,
-            e.losses,
-            e.score_pct
+            e.candidate_id, e.generation, e.elo, e.games, e.wins, e.draws, e.losses, e.score_pct
         );
     }
     println!();
@@ -1228,53 +1196,54 @@ fn run_standalone_match(
             std::thread::Builder::new()
                 .stack_size(8 * 1024 * 1024)
                 .spawn_scoped(s, || {
-                loop {
-                    let idx = next_idx.fetch_add(1, Ordering::Relaxed);
-                    if idx >= total {
-                        break;
-                    }
+                    loop {
+                        let idx = next_idx.fetch_add(1, Ordering::Relaxed);
+                        if idx >= total {
+                            break;
+                        }
 
-                    let sl = &slots[idx];
+                        let sl = &slots[idx];
 
-                    let we = find_engine(&sl.wid).expect("engine not found");
-                    let be = find_engine(&sl.bid).expect("engine not found");
-                    let mut white_eng = (we.create)();
-                    let mut black_eng = (be.create)();
+                        let we = find_engine(&sl.wid).expect("engine not found");
+                        let be = find_engine(&sl.bid).expect("engine not found");
+                        let mut white_eng = (we.create)();
+                        let mut black_eng = (be.create)();
 
-                    let outcome = play_game(
-                        white_eng.as_mut(),
-                        &sl.wid,
-                        black_eng.as_mut(),
-                        &sl.bid,
-                        sl.seed,
-                        budget_us,
-                        db_path,
-                        sl.gid,
-                        &print_mu,
-                    );
-
-                    // Update game result in DB
-                    let gdb =
-                        Connection::open(db_path).expect("failed to open db for result update");
-                    gdb.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
-                        .ok();
-                    gdb.execute(
-                        "UPDATE games SET result=?1, termination=?2, ply_count=?3, \
-                         final_fen=?4, wall_time_ms=?5 WHERE game_id=?6",
-                        params![
-                            result_str(outcome.result),
-                            outcome.termination,
-                            outcome.ply_count,
-                            outcome.final_fen,
-                            outcome.wall_time_ms,
+                        let outcome = play_game(
+                            white_eng.as_mut(),
+                            &sl.wid,
+                            black_eng.as_mut(),
+                            &sl.bid,
+                            sl.seed,
+                            budget_us,
+                            db_path,
                             sl.gid,
-                        ],
-                    )
-                    .expect("failed to update game result");
+                            &print_mu,
+                        );
 
-                    *outcomes[idx].lock().unwrap() = Some((outcome.result, sl.swap));
-                }
-            }).unwrap();
+                        // Update game result in DB
+                        let gdb =
+                            Connection::open(db_path).expect("failed to open db for result update");
+                        gdb.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+                            .ok();
+                        gdb.execute(
+                            "UPDATE games SET result=?1, termination=?2, ply_count=?3, \
+                         final_fen=?4, wall_time_ms=?5 WHERE game_id=?6",
+                            params![
+                                result_str(outcome.result),
+                                outcome.termination,
+                                outcome.ply_count,
+                                outcome.final_fen,
+                                outcome.wall_time_ms,
+                                sl.gid,
+                            ],
+                        )
+                        .expect("failed to update game result");
+
+                        *outcomes[idx].lock().unwrap() = Some((outcome.result, sl.swap));
+                    }
+                })
+                .unwrap();
         }
     });
 
@@ -1305,7 +1274,10 @@ fn run_standalone_match(
         }
     }
 
-    println!("=== FINAL: {} {} - {} - {} {} ===", name1, w1, draws, w2, name2);
+    println!(
+        "=== FINAL: {} {} - {} - {} {} ===",
+        name1, w1, draws, w2, name2
+    );
 
     println!("\nDB: {}", db_path);
     {
@@ -1390,7 +1362,7 @@ fn main() {
         for suffix in &["", "-shm", "-wal"] {
             let path = format!("{}{}", db_path, suffix);
             if std::path::Path::new(&path).exists() {
-                std::fs::remove_file(&path).expect(&format!("failed to delete {}", path));
+                std::fs::remove_file(&path).unwrap_or_else(|_| panic!("failed to delete {}", path));
                 eprintln!("Deleted {}", path);
                 deleted = true;
             }

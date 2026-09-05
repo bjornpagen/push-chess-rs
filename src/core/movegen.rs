@@ -1,8 +1,8 @@
+use super::children::{LendingIterator, PseudoLegalChildren};
 /// Legal and pseudo-legal move generation for Push Chess,
 /// ported 1:1 from C++ `core/movegen.cc`.
-
 use super::position::Position;
-use super::push::{resolve_knight_push, resolve_push, PushInfo, PushResult};
+use super::push::{PushPlan, resolve_knight_push, resolve_push};
 use super::types::*;
 
 const RAY_DR: [i32; 8] = [1, -1, 0, 0, 1, 1, -1, -1];
@@ -12,10 +12,10 @@ const KNIGHT_DR: [i32; 8] = [-2, -2, -1, -1, 1, 1, 2, 2];
 const KNIGHT_DC: [i32; 8] = [-1, 1, -2, 2, -2, 2, -1, 1];
 
 /// Check if any displacement moves a pawn of color `us` to its promotion rank.
-fn needs_promotion(pos: &Position, info: &PushInfo, us: Color) -> bool {
+fn needs_promotion(pos: &Position, info: &PushPlan, us: Color) -> bool {
     let promo_rank = if us == Color::White { 7 } else { 0 };
-    for i in 0..info.num_displacements {
-        let (f_sq, t_sq) = info.displacements[i];
+    for i in 0..info.displacements().len() {
+        let (f_sq, t_sq) = info.displacements()[i];
         let piece = pos.board[f_sq as usize];
         if piece.piece_type == PieceType::Pawn && piece.is_color(us) && rank_of(t_sq) == promo_rank
         {
@@ -29,7 +29,7 @@ fn needs_promotion(pos: &Position, info: &PushInfo, us: Color) -> bool {
 fn add_move(
     out: &mut Vec<Move>,
     pos: &Position,
-    info: &PushInfo,
+    info: &PushPlan,
     from: Square,
     to: Square,
     path_kind: u8,
@@ -79,9 +79,7 @@ fn gen_slider_moves(
         let dc = RAY_DC[dir];
         let mut r = rank_of(from);
         let mut f = file_of(from);
-        let mut stop: u8 = 0;
-
-        for _dist in 1..=7 {
+        for stop in 0u8..7 {
             r += dr;
             f += dc;
             if !valid_rf(r, f) {
@@ -89,15 +87,13 @@ fn gen_slider_moves(
             }
             let to = make_square(r, f);
 
-            let info = resolve_push(pos, from, to, dr, dc);
-            if info.result == PushResult::Illegal {
+            let Some(info) = resolve_push(pos, from, to, dr, dc) else {
                 break;
-            }
+            };
 
             add_move(out, pos, &info, from, to, 0, stop, SpecialMove::None, us);
-            stop += 1;
 
-            if info.result == PushResult::Capture {
+            if info.captured().is_some() {
                 break;
             }
         }
@@ -117,14 +113,13 @@ fn gen_pawn_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>) 
         if valid_rf(nr, f) {
             let to = make_square(nr, f);
             if pos.board[to as usize].is_empty() {
-                let mut info = PushInfo::default();
-                info.result = PushResult::OK;
-                info.add_displacement(from, to);
+                let info = PushPlan::single(from, to, None);
                 add_move(out, pos, &info, from, to, 0, 0, SpecialMove::None, us);
             } else if pos.board[to as usize].is_color(us) {
                 // Push friendly piece forward
-                let info = resolve_push(pos, from, to, dr, 0);
-                if info.result == PushResult::OK {
+                if let Some(info) =
+                    resolve_push(pos, from, to, dr, 0).filter(|p| p.captured().is_none())
+                {
                     add_move(out, pos, &info, from, to, 0, 0, SpecialMove::None, us);
                 }
             }
@@ -137,8 +132,9 @@ fn gen_pawn_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>) 
         let nr = r + 2 * dr;
         if valid_rf(nr, f) {
             let to = make_square(nr, f);
-            let info = resolve_push(pos, from, to, dr, 0);
-            if info.result == PushResult::OK {
+            if let Some(info) =
+                resolve_push(pos, from, to, dr, 0).filter(|p| p.captured().is_none())
+            {
                 add_move(out, pos, &info, from, to, 0, 1, SpecialMove::None, us);
             }
             // Pawn can't capture with double push
@@ -156,10 +152,7 @@ fn gen_pawn_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>) 
 
         if !pos.board[to as usize].is_empty() && !pos.board[to as usize].is_color(us) {
             // Capture
-            let mut info = PushInfo::default();
-            info.result = PushResult::Capture;
-            info.add_displacement(from, to);
-            info.captured_sq = to;
+            let info = PushPlan::single(from, to, Some(to));
             add_move(out, pos, &info, from, to, 0, 0, SpecialMove::None, us);
         }
     }
@@ -192,36 +185,15 @@ fn gen_knight_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>
         }
         let to = make_square(r, f);
 
-        // Try both decompositions
-        let mut added_path1 = false;
-
+        // Equal plans have the same displacements and capture, regardless of path.
         let info1 = resolve_knight_push(pos, from, to, true);
-        if info1.result != PushResult::Illegal {
-            add_move(out, pos, &info1, from, to, 1, 0, SpecialMove::None, us);
-            added_path1 = true;
+        if let Some(info) = &info1 {
+            add_move(out, pos, info, from, to, 1, 0, SpecialMove::None, us);
         }
-
-        let info2 = resolve_knight_push(pos, from, to, false);
-        if info2.result != PushResult::Illegal {
-            // Only add path 2 if it produces a different result than path 1
-            // or if path 1 was illegal
-            if !added_path1 {
-                add_move(out, pos, &info2, from, to, 2, 0, SpecialMove::None, us);
-            } else {
-                // Check if the displacements differ
-                let mut same = info1.num_displacements == info2.num_displacements;
-                if same {
-                    for j in 0..info1.num_displacements {
-                        if info1.displacements[j] != info2.displacements[j] {
-                            same = false;
-                            break;
-                        }
-                    }
-                }
-                if !same {
-                    add_move(out, pos, &info2, from, to, 2, 0, SpecialMove::None, us);
-                }
-            }
+        if let Some(info) = resolve_knight_push(pos, from, to, false)
+            && info1.as_ref() != Some(&info)
+        {
+            add_move(out, pos, &info, from, to, 2, 0, SpecialMove::None, us);
         }
     }
 }
@@ -261,8 +233,7 @@ fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>) 
             });
         } else {
             // Friendly piece — king pushes it along the movement direction
-            let info = resolve_push(pos, from, to, RAY_DR[dir], RAY_DC[dir]);
-            if info.result == PushResult::OK {
+            if let Some(info) = resolve_push(pos, from, to, RAY_DR[dir], RAY_DC[dir]) {
                 add_move(out, pos, &info, from, to, 0, 0, SpecialMove::None, us);
             }
         }
@@ -285,20 +256,20 @@ fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>) 
     if pos.castling_rights & ks_flag != 0 {
         let f_sq = make_square(castle_rank, 5);
         let g_sq = make_square(castle_rank, 6);
-        if pos.board[f_sq as usize].is_empty() && pos.board[g_sq as usize].is_empty() {
-            if !pos.is_attacked_by(from, them)
-                && !pos.is_attacked_by(f_sq, them)
-                && !pos.is_attacked_by(g_sq, them)
-            {
-                out.push(Move {
-                    from,
-                    to: g_sq,
-                    path_kind: 0,
-                    stop_index: 0,
-                    special: SpecialMove::Castle,
-                    promo_piece: PieceType::None,
-                });
-            }
+        if pos.board[f_sq as usize].is_empty()
+            && pos.board[g_sq as usize].is_empty()
+            && !pos.is_attacked_by(from, them)
+            && !pos.is_attacked_by(f_sq, them)
+            && !pos.is_attacked_by(g_sq, them)
+        {
+            out.push(Move {
+                from,
+                to: g_sq,
+                path_kind: 0,
+                stop_index: 0,
+                special: SpecialMove::Castle,
+                promo_piece: PieceType::None,
+            });
         }
     }
 
@@ -315,20 +286,18 @@ fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>) 
         if pos.board[d_sq as usize].is_empty()
             && pos.board[c_sq as usize].is_empty()
             && pos.board[b_sq as usize].is_empty()
+            && !pos.is_attacked_by(from, them)
+            && !pos.is_attacked_by(d_sq, them)
+            && !pos.is_attacked_by(c_sq, them)
         {
-            if !pos.is_attacked_by(from, them)
-                && !pos.is_attacked_by(d_sq, them)
-                && !pos.is_attacked_by(c_sq, them)
-            {
-                out.push(Move {
-                    from,
-                    to: c_sq,
-                    path_kind: 0,
-                    stop_index: 0,
-                    special: SpecialMove::Castle,
-                    promo_piece: PieceType::None,
-                });
-            }
+            out.push(Move {
+                from,
+                to: c_sq,
+                path_kind: 0,
+                stop_index: 0,
+                special: SpecialMove::Castle,
+                promo_piece: PieceType::None,
+            });
         }
     }
 }
@@ -358,16 +327,11 @@ pub fn generate_pseudo_legal_moves(pos: &Position, out: &mut Vec<Move>) {
 /// Generate all legal moves for the side to move.
 /// Uses make/unmake on the mutable position to test legality.
 pub fn generate_legal_moves(pos: &mut Position, out: &mut Vec<Move>) {
-    let mut pseudo = Vec::new();
-    generate_pseudo_legal_moves(pos, &mut pseudo);
-
     let us = pos.side_to_move;
-
-    for m in pseudo {
-        pos.make_move(&m);
-        if !pos.in_check_color(us) {
-            out.push(m);
+    let mut children = PseudoLegalChildren::new(pos);
+    while let Some(child) = children.next() {
+        if !child.in_check_color(us) {
+            out.push(child.mv());
         }
-        pos.unmake_move();
     }
 }

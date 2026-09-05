@@ -1,3 +1,5 @@
+use super::support::ScoredMoves;
+type MoveList = ScoredMoves<256>;
 // razor_001: Packed inline MoveList + integer scoring + move validation
 //
 // Based on wraith_001 (specter+tempest hybrid) with performance changes:
@@ -21,57 +23,14 @@
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use crate::core::types::*;
-use crate::core::position::Position;
 use crate::core::movegen::generate_legal_moves;
+use crate::core::position::Position;
+use crate::core::types::*;
 use crate::engine::Engine;
 
 // ---------------------------------------------------------------------------
 // Packed inline MoveList
 // ---------------------------------------------------------------------------
-
-const MAX_MOVES: usize = 256;
-
-struct MoveList {
-    moves: [Move; MAX_MOVES],
-    scores: [i32; MAX_MOVES],
-    len: usize,
-}
-
-impl MoveList {
-    fn new() -> Self {
-        Self {
-            moves: [Move::default(); MAX_MOVES],
-            scores: [0i32; MAX_MOVES],
-            len: 0,
-        }
-    }
-
-    #[inline]
-    fn push(&mut self, m: Move) {
-        debug_assert!(self.len < MAX_MOVES);
-        self.moves[self.len] = m;
-        self.len += 1;
-    }
-
-    /// Scalar selection sort — swap both moves[] and scores[] in lockstep.
-    fn selection_sort(&mut self) {
-        for i in 0..self.len {
-            let mut best_idx = i;
-            let mut best_val = self.scores[i];
-            for j in (i + 1)..self.len {
-                if self.scores[j] > best_val {
-                    best_val = self.scores[j];
-                    best_idx = j;
-                }
-            }
-            if best_idx != i {
-                self.moves.swap(i, best_idx);
-                self.scores.swap(i, best_idx);
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // TT (1M entries)
@@ -91,8 +50,8 @@ struct TTEntry {
     to: u8,
     path_kind: u8,
     stop_idx: u8,
-    special: u8,
-    promo: u8,
+    special: SpecialMove,
+    promo: PieceType,
 }
 
 fn tt_to_move(e: &TTEntry) -> Move {
@@ -101,21 +60,8 @@ fn tt_to_move(e: &TTEntry) -> Move {
         to: e.to,
         path_kind: e.path_kind,
         stop_index: e.stop_idx,
-        special: match e.special {
-            1 => SpecialMove::Castle,
-            2 => SpecialMove::EnPassant,
-            3 => SpecialMove::Promotion,
-            _ => SpecialMove::None,
-        },
-        promo_piece: match e.promo {
-            1 => PieceType::Pawn,
-            2 => PieceType::Knight,
-            3 => PieceType::Bishop,
-            4 => PieceType::Rook,
-            5 => PieceType::Queen,
-            6 => PieceType::King,
-            _ => PieceType::None,
-        },
+        special: e.special,
+        promo_piece: e.promo,
     }
 }
 
@@ -128,7 +74,9 @@ struct LmrTable {
 }
 
 static LMR: LazyLock<LmrTable> = LazyLock::new(|| {
-    let mut t = LmrTable { table: [[0i32; 256]; 32] };
+    let mut t = LmrTable {
+        table: [[0i32; 256]; 32],
+    };
     for d in 0..32 {
         for m in 0..256 {
             t.table[d][m] = if d < 2 || m < 3 {
@@ -179,7 +127,7 @@ impl RazorEngine {
             killers: [[Move::default(); 2]; 64],
             countermove: [[Move::default(); 64]; 64],
             prev_move: Move::default(),
-            move_buf: Vec::with_capacity(MAX_MOVES),
+            move_buf: Vec::with_capacity(256),
             nodes: 0,
             qnodes: 0,
             beta_cuts: 0,
@@ -203,10 +151,11 @@ impl RazorEngine {
         if self.stopped {
             return true;
         }
-        if self.budget_max_time_us > 0 && (self.nodes & 255) == 0 {
-            if self.elapsed_us() >= self.budget_max_time_us * 9 / 10 {
-                self.stopped = true;
-            }
+        if self.budget_max_time_us > 0
+            && (self.nodes & 255) == 0
+            && self.elapsed_us() >= self.budget_max_time_us * 9 / 10
+        {
+            self.stopped = true;
         }
         self.stopped
     }
@@ -224,8 +173,8 @@ impl RazorEngine {
             e.to = m.to;
             e.path_kind = m.path_kind;
             e.stop_idx = m.stop_index;
-            e.special = m.special as u8;
-            e.promo = m.promo_piece as u8;
+            e.special = m.special;
+            e.promo = m.promo_piece;
         }
     }
 
@@ -281,10 +230,10 @@ impl RazorEngine {
                 let mut passed = true;
                 let dir: i32 = if c == Color::White { 1 } else { -1 };
                 let mut fr = r + dir;
-                'passed_check: while fr >= 0 && fr < 8 && passed {
+                'passed_check: while (0..8).contains(&fr) && passed {
                     for df in -1..=1 {
                         let ff = f + df;
-                        if ff < 0 || ff > 7 {
+                        if !(0..=7).contains(&ff) {
                             continue;
                         }
                         let cs = (fr * 8 + ff) as u8;
@@ -307,11 +256,9 @@ impl RazorEngine {
             if pt == PieceType::Bishop {
                 bishop_count[ci] += 1;
             }
-            if pt == PieceType::Rook || pt == PieceType::Queen {
-                if slider_n[ci] < 16 {
-                    slider_sq[ci][slider_n[ci]] = sq;
-                    slider_n[ci] += 1;
-                }
+            if (pt == PieceType::Rook || pt == PieceType::Queen) && slider_n[ci] < 16 {
+                slider_sq[ci][slider_n[ci]] = sq;
+                slider_n[ci] += 1;
             }
 
             // Track non-king pieces for push awareness
@@ -404,7 +351,7 @@ impl RazorEngine {
                 let pf = psq & 7;
                 let file_dist = (pf - kf).abs();
                 let rank_ahead = (pr - kr) * shield_dir;
-                if file_dist <= 1 && rank_ahead >= 1 && rank_ahead <= 2 {
+                if file_dist <= 1 && (1..=2).contains(&rank_ahead) {
                     sc_pos += sign * 15;
                 }
             }
@@ -448,7 +395,7 @@ impl RazorEngine {
                     }
                     let nr = kr + dr;
                     let nf = kf + df;
-                    if nr < 0 || nr > 7 || nf < 0 || nf > 7 {
+                    if !(0..=7).contains(&nr) || !(0..=7).contains(&nf) {
                         continue;
                     }
                     let ns = (nr * 8 + nf) as u8;
@@ -460,7 +407,7 @@ impl RazorEngine {
                         adj_friendly += 1;
                         let er = nr + dr;
                         let ef = nf + df;
-                        if er >= 0 && er <= 7 && ef >= 0 && ef <= 7 {
+                        if (0..=7).contains(&er) && (0..=7).contains(&ef) {
                             let es = (er * 8 + ef) as u8;
                             if pos.board[es as usize].is_empty() {
                                 push_escapes += 1;
@@ -486,7 +433,9 @@ impl RazorEngine {
                 let mut vulnerable = false;
 
                 for si in 0..slider_n[oci] {
-                    if vulnerable { break; }
+                    if vulnerable {
+                        break;
+                    }
                     let ssq = slider_sq[oci][si] as i32;
                     let sr = ssq >> 3;
                     let sf = ssq & 7;
@@ -495,8 +444,20 @@ impl RazorEngine {
                         continue;
                     }
 
-                    let dr: i32 = if sr == pr { 0 } else if pr > sr { 1 } else { -1 };
-                    let df: i32 = if sf == pf { 0 } else if pf > sf { 1 } else { -1 };
+                    let dr: i32 = if sr == pr {
+                        0
+                    } else if pr > sr {
+                        1
+                    } else {
+                        -1
+                    };
+                    let df: i32 = if sf == pf {
+                        0
+                    } else if pf > sf {
+                        1
+                    } else {
+                        -1
+                    };
 
                     let mut clear = true;
                     let mut cr = sr + dr;
@@ -516,7 +477,7 @@ impl RazorEngine {
 
                     let br = pr + dr;
                     let bf = pf + df;
-                    if br >= 0 && br <= 7 && bf >= 0 && bf <= 7 {
+                    if (0..=7).contains(&br) && (0..=7).contains(&bf) {
                         let bs = (br * 8 + bf) as usize;
                         let bp = pos.board[bs];
                         if !bp.is_empty() && bp.color == c {
@@ -546,11 +507,11 @@ impl RazorEngine {
             Move::default()
         };
 
-        for i in 0..ml.len {
-            let m = &ml.moves[i];
-            let s: i32;
-            if *m == *ttm {
-                s = 10_000_000;
+        for i in 0..ml.len() {
+            let m = &ml[i].mv;
+
+            let s: i32 = if *m == *ttm {
+                10_000_000
             } else {
                 let mut sv: i32 = 0;
                 if !pos.board[m.to as usize].is_empty() {
@@ -582,10 +543,11 @@ impl RazorEngine {
                 if *m == cm {
                     sv += 60_000;
                 }
-                sv += self.history[pos.side_to_move as usize][m.from as usize][m.to as usize] as i32;
-                s = sv;
-            }
-            ml.scores[i] = s;
+                sv +=
+                    self.history[pos.side_to_move as usize][m.from as usize][m.to as usize] as i32;
+                sv
+            };
+            ml[i].score = s;
         }
 
         ml.selection_sort();
@@ -684,21 +646,21 @@ impl RazorEngine {
             self.move_buf = buf;
         }
 
-        if ml.len == 0 {
+        if ml.is_empty() {
             return if in_check { -99000 + ply } else { 0 };
         }
         self.order_moves(pos, &mut ml, ply as usize, &ttm);
 
         let saved_prev = self.prev_move;
-        let mut best_move = ml.moves[0];
+        let mut best_move = ml[0].mv;
         let mut best_score = -100000i32;
         let mut flag: u8 = 1;
 
-        for i in 0..ml.len {
+        for i in 0..ml.len() {
             if self.stopped {
                 break;
             }
-            let m = ml.moves[i];
+            let m = ml[i].mv;
 
             // is_tactical BEFORE make_move
             let is_tactical = !pos.board[m.to as usize].is_empty()
@@ -730,10 +692,19 @@ impl RazorEngine {
                 }
                 r = r.clamp(1, depth - 1);
 
-                let s0 = -self.search(pos, depth - 1 - r, -(alpha + 1), -alpha, ply + 1, gives_check, false);
+                let s0 = -self.search(
+                    pos,
+                    depth - 1 - r,
+                    -(alpha + 1),
+                    -alpha,
+                    ply + 1,
+                    gives_check,
+                    false,
+                );
                 if s0 > alpha && !self.stopped {
                     self.lmr_re += 1;
-                    score = -self.search(pos, depth - 1, -beta, -alpha, ply + 1, gives_check, is_pv);
+                    score =
+                        -self.search(pos, depth - 1, -beta, -alpha, ply + 1, gives_check, is_pv);
                 } else {
                     score = s0;
                 }
@@ -741,14 +712,38 @@ impl RazorEngine {
                 // Check extension up to depth 4
                 let ext = if gives_check && depth <= 4 { 1 } else { 0 };
                 if i > 0 && !self.stopped {
-                    let s1 = -self.search(pos, depth - 1 + ext, -(alpha + 1), -alpha, ply + 1, gives_check, false);
+                    let s1 = -self.search(
+                        pos,
+                        depth - 1 + ext,
+                        -(alpha + 1),
+                        -alpha,
+                        ply + 1,
+                        gives_check,
+                        false,
+                    );
                     if s1 > alpha && s1 < beta && !self.stopped {
-                        score = -self.search(pos, depth - 1 + ext, -beta, -alpha, ply + 1, gives_check, is_pv);
+                        score = -self.search(
+                            pos,
+                            depth - 1 + ext,
+                            -beta,
+                            -alpha,
+                            ply + 1,
+                            gives_check,
+                            is_pv,
+                        );
                     } else {
                         score = s1;
                     }
                 } else {
-                    score = -self.search(pos, depth - 1 + ext, -beta, -alpha, ply + 1, gives_check, is_pv);
+                    score = -self.search(
+                        pos,
+                        depth - 1 + ext,
+                        -beta,
+                        -alpha,
+                        ply + 1,
+                        gives_check,
+                        is_pv,
+                    );
                 }
             }
             pos.unmake_move();
@@ -774,8 +769,9 @@ impl RazorEngine {
                     let h = &mut self.history[ci][m.from as usize][m.to as usize];
                     *h = (*h + (depth * depth) as i16).min(16000);
                     for j in 0..i {
-                        if pos.board[ml.moves[j].to as usize].is_empty() {
-                            let hh = &mut self.history[ci][ml.moves[j].from as usize][ml.moves[j].to as usize];
+                        if pos.board[ml[j].mv.to as usize].is_empty() {
+                            let hh =
+                                &mut self.history[ci][ml[j].mv.from as usize][ml[j].mv.to as usize];
                             *hh = (*hh - depth as i16).max(-16000);
                         }
                     }
@@ -920,7 +916,7 @@ impl RazorEngine {
             let mut buf = std::mem::take(&mut self.move_buf);
             buf.clear();
             generate_legal_moves(pos, &mut buf);
-            let found = buf.iter().any(|lm| *lm == m);
+            let found = buf.contains(&m);
             self.move_buf = buf;
             if !found {
                 break;
@@ -936,8 +932,8 @@ impl RazorEngine {
 
     fn dump_diag(&mut self, pos: &mut Position, root: &MoveList, stats: &mut SearchStats) {
         let mut ranked: Vec<(String, i32)> = Vec::new();
-        for i in 0..root.len {
-            let m = &root.moves[i];
+        for i in 0..root.len() {
+            let m = &root[i].mv;
             pos.make_move(m);
             let key = pos.zobrist;
             let idx = (key as usize) & TT_MASK;
@@ -969,13 +965,18 @@ impl RazorEngine {
             }
             ranked.push((uci, sc));
         }
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        ranked.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         let cap = ranked.len().min(32);
 
         let mut diag = format!(
             r#"{{"engine":"razor_001","qn":{},"tt":{},"bcut":{},"fcut":{},"nmp":{},"lmr":[{},{}],"top_moves":["#,
-            self.qnodes, self.tt_hits, self.beta_cuts, self.first_cuts,
-            self.null_cuts, self.lmr_tries, self.lmr_re,
+            self.qnodes,
+            self.tt_hits,
+            self.beta_cuts,
+            self.first_cuts,
+            self.null_cuts,
+            self.lmr_tries,
+            self.lmr_re,
         );
         for i in 0..cap {
             if i > 0 {
@@ -1030,16 +1031,16 @@ impl Engine for RazorEngine {
 
         let mut stats = SearchStats::default();
 
-        if root.len == 0 {
+        if root.is_empty() {
             return (Move::default(), stats);
         }
-        if root.len == 1 {
+        if root.len() == 1 {
             stats.nodes = 1;
             stats.depth_reached = 0;
-            return (root.moves[0], stats);
+            return (root[0].mv, stats);
         }
 
-        let mut best = root.moves[0];
+        let mut best = root[0].mv;
         let mut best_score = -100000i32;
 
         for depth in 1..=30 {
@@ -1061,33 +1062,42 @@ impl Engine for RazorEngine {
             let mut aspiration_fail = false;
 
             loop {
-                iter_best = root.moves[0];
+                iter_best = root[0].mv;
                 iter_best_score = -100000;
 
                 // Order root moves: put previous iteration's best first
-                for i in 0..root.len {
-                    if root.moves[i] == best {
+                for i in 0..root.len() {
+                    if root[i].mv == best {
                         if i != 0 {
-                            root.moves.swap(0, i);
+                            root.swap(0, i);
                         }
                         break;
                     }
                 }
 
-                for i in 0..root.len {
+                for i in 0..root.len() {
                     if self.stopped {
                         break;
                     }
-                    let m = root.moves[i];
+                    let m = root[i].mv;
                     self.prev_move = m;
                     pos.make_move(&m);
                     let gives_check = pos.in_check();
 
                     let score;
                     if i > 0 && !self.stopped {
-                        let s1 = -self.search(pos, depth - 1, -(alpha + 1), -alpha, 1, gives_check, false);
+                        let s1 = -self.search(
+                            pos,
+                            depth - 1,
+                            -(alpha + 1),
+                            -alpha,
+                            1,
+                            gives_check,
+                            false,
+                        );
                         if s1 > alpha && s1 < beta && !self.stopped {
-                            score = -self.search(pos, depth - 1, -beta, -alpha, 1, gives_check, true);
+                            score =
+                                -self.search(pos, depth - 1, -beta, -alpha, 1, gives_check, true);
                         } else {
                             score = s1;
                         }
@@ -1147,13 +1157,13 @@ impl Engine for RazorEngine {
         // Fallback for losing positions
         if best_score <= -90000 {
             let mut bs = -100000i32;
-            for i in 0..root.len {
-                pos.make_move(&root.moves[i]);
+            for i in 0..root.len() {
+                pos.make_move(&root[i].mv);
                 let sc = -self.evaluate(pos);
                 pos.unmake_move();
                 if sc > bs {
                     bs = sc;
-                    best = root.moves[i];
+                    best = root[i].mv;
                 }
             }
         }
@@ -1161,7 +1171,7 @@ impl Engine for RazorEngine {
         // Re-validate: generate fresh legal moves and verify best is among them
         let mut validation_buf = Vec::new();
         generate_legal_moves(pos, &mut validation_buf);
-        let valid = validation_buf.iter().any(|m| *m == best);
+        let valid = validation_buf.contains(&best);
         if !valid {
             // Fallback to first legal move
             if !validation_buf.is_empty() {

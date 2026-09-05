@@ -1,3 +1,5 @@
+use super::support::ScoredMoves;
+type MoveList = ScoredMoves<256>;
 // omega_001: Singularity's exact push eval + Phantom's king zone attack scoring
 //
 // Merges the two tournament champions:
@@ -8,10 +10,10 @@
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use crate::core::types::*;
-use crate::core::position::Position;
 use crate::core::movegen::generate_legal_moves;
-use crate::core::push::{resolve_push, PushResult};
+use crate::core::position::Position;
+use crate::core::push::resolve_push;
+use crate::core::types::*;
 use crate::core::zobrist::zobrist_tables;
 use crate::engine::Engine;
 
@@ -20,74 +22,49 @@ use crate::engine::Engine;
 // ---------------------------------------------------------------------------
 
 const PAWN_PST: [i32; 64] = [
-     0,  0,  0,  0,  0,  0,  0,  0,
-     5, 10, 10,-20,-20, 10, 10,  5,
-     5, -5,-10,  0,  0,-10, -5,  5,
-     0,  0,  0, 20, 20,  0,  0,  0,
-     5,  5, 10, 25, 25, 10,  5,  5,
-    10, 10, 20, 30, 30, 20, 10, 10,
-    50, 50, 50, 50, 50, 50, 50, 50,
-     0,  0,  0,  0,  0,  0,  0,  0,
+    0, 0, 0, 0, 0, 0, 0, 0, 5, 10, 10, -20, -20, 10, 10, 5, 5, -5, -10, 0, 0, -10, -5, 5, 0, 0, 0,
+    20, 20, 0, 0, 0, 5, 5, 10, 25, 25, 10, 5, 5, 10, 10, 20, 30, 30, 20, 10, 10, 50, 50, 50, 50,
+    50, 50, 50, 50, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
 const KNIGHT_PST: [i32; 64] = [
-    -50,-40,-30,-30,-30,-30,-40,-50,
-    -40,-20,  0,  5,  5,  0,-20,-40,
-    -30,  5, 10, 15, 15, 10,  5,-30,
-    -30,  0, 15, 20, 20, 15,  0,-30,
-    -30,  5, 15, 20, 20, 15,  5,-30,
-    -30,  0, 10, 15, 15, 10,  0,-30,
-    -40,-20,  0,  0,  0,  0,-20,-40,
-    -50,-40,-30,-30,-30,-30,-40,-50,
+    -50, -40, -30, -30, -30, -30, -40, -50, -40, -20, 0, 5, 5, 0, -20, -40, -30, 5, 10, 15, 15, 10,
+    5, -30, -30, 0, 15, 20, 20, 15, 0, -30, -30, 5, 15, 20, 20, 15, 5, -30, -30, 0, 10, 15, 15, 10,
+    0, -30, -40, -20, 0, 0, 0, 0, -20, -40, -50, -40, -30, -30, -30, -30, -40, -50,
 ];
 
 const BISHOP_PST: [i32; 64] = [
-    -20,-10,-10,-10,-10,-10,-10,-20,
-    -10,  5,  0,  0,  0,  0,  5,-10,
-    -10, 10, 10, 10, 10, 10, 10,-10,
-    -10,  0, 10, 10, 10, 10,  0,-10,
-    -10,  5,  5, 10, 10,  5,  5,-10,
-    -10,  0,  5, 10, 10,  5,  0,-10,
-    -10,  0,  0,  0,  0,  0,  0,-10,
-    -20,-10,-10,-10,-10,-10,-10,-20,
+    -20, -10, -10, -10, -10, -10, -10, -20, -10, 5, 0, 0, 0, 0, 5, -10, -10, 10, 10, 10, 10, 10,
+    10, -10, -10, 0, 10, 10, 10, 10, 0, -10, -10, 5, 5, 10, 10, 5, 5, -10, -10, 0, 5, 10, 10, 5, 0,
+    -10, -10, 0, 0, 0, 0, 0, 0, -10, -20, -10, -10, -10, -10, -10, -10, -20,
 ];
 
 const ROOK_PST: [i32; 64] = [
-      0,  0,  0,  5,  5,  0,  0,  0,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-      5, 10, 10, 10, 10, 10, 10,  5,
-      0,  0,  0,  0,  0,  0,  0,  0,
+    0, 0, 0, 5, 5, 0, 0, 0, -5, 0, 0, 0, 0, 0, 0, -5, -5, 0, 0, 0, 0, 0, 0, -5, -5, 0, 0, 0, 0, 0,
+    0, -5, -5, 0, 0, 0, 0, 0, 0, -5, -5, 0, 0, 0, 0, 0, 0, -5, 5, 10, 10, 10, 10, 10, 10, 5, 0, 0,
+    0, 0, 0, 0, 0, 0,
 ];
 
 const QUEEN_PST: [i32; 64] = [
-    -20,-10,-10, -5, -5,-10,-10,-20,
-    -10,  0,  0,  0,  0,  0,  0,-10,
-    -10,  0,  5,  5,  5,  5,  0,-10,
-     -5,  0,  5,  5,  5,  5,  0, -5,
-      0,  0,  5,  5,  5,  5,  0, -5,
-    -10,  5,  5,  5,  5,  5,  0,-10,
-    -10,  0,  5,  0,  0,  0,  0,-10,
-    -20,-10,-10, -5, -5,-10,-10,-20,
+    -20, -10, -10, -5, -5, -10, -10, -20, -10, 0, 0, 0, 0, 0, 0, -10, -10, 0, 5, 5, 5, 5, 0, -10,
+    -5, 0, 5, 5, 5, 5, 0, -5, 0, 0, 5, 5, 5, 5, 0, -5, -10, 5, 5, 5, 5, 5, 0, -10, -10, 0, 5, 0, 0,
+    0, 0, -10, -20, -10, -10, -5, -5, -10, -10, -20,
 ];
 
 const KING_PST: [i32; 64] = [
-     20, 30, 10,  0,  0, 10, 30, 20,
-     20, 20,  0,  0,  0,  0, 20, 20,
-    -10,-20,-20,-20,-20,-20,-20,-10,
-    -20,-30,-30,-40,-40,-30,-30,-20,
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -30,-40,-40,-50,-50,-40,-40,-30,
+    20, 30, 10, 0, 0, 10, 30, 20, 20, 20, 0, 0, 0, 0, 20, 20, -10, -20, -20, -20, -20, -20, -20,
+    -10, -20, -30, -30, -40, -40, -30, -30, -20, -30, -40, -40, -50, -50, -40, -40, -30, -30, -40,
+    -40, -50, -50, -40, -40, -30, -30, -40, -40, -50, -50, -40, -40, -30, -30, -40, -40, -50, -50,
+    -40, -40, -30,
 ];
 
 #[inline(always)]
 fn pst_value(pt: PieceType, c: Color, sq: u8) -> i32 {
-    let idx = if c == Color::White { sq as usize } else { (sq ^ 56) as usize };
+    let idx = if c == Color::White {
+        sq as usize
+    } else {
+        (sq ^ 56) as usize
+    };
     match pt {
         PieceType::Pawn => PAWN_PST[idx],
         PieceType::Knight => KNIGHT_PST[idx],
@@ -106,50 +83,25 @@ fn pst_value(pt: PieceType, c: Color, sq: u8) -> i32 {
 const BISHOP_DIRS: [(i32, i32); 4] = [(-1, -1), (-1, 1), (1, -1), (1, 1)];
 const ROOK_DIRS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 const QUEEN_DIRS: [(i32, i32); 8] = [
-    (-1, -1), (-1, 1), (1, -1), (1, 1),
-    (-1, 0), (1, 0), (0, -1), (0, 1)
+    (-1, -1),
+    (-1, 1),
+    (1, -1),
+    (1, 1),
+    (-1, 0),
+    (1, 0),
+    (0, -1),
+    (0, 1),
 ];
 const KNIGHT_OFFSETS: [(i32, i32); 8] = [
-    (-2, -1), (-2, 1), (-1, -2), (-1, 2),
-    (1, -2), (1, 2), (2, -1), (2, 1),
+    (-2, -1),
+    (-2, 1),
+    (-1, -2),
+    (-1, 2),
+    (1, -2),
+    (1, 2),
+    (2, -1),
+    (2, 1),
 ];
-
-const MAX_MOVES: usize = 256;
-
-struct MoveList {
-    moves: [Move; MAX_MOVES],
-    scores: [i32; MAX_MOVES],
-    len: usize,
-}
-
-impl MoveList {
-    fn new() -> Self {
-        Self { moves: [Move::default(); MAX_MOVES], scores: [0i32; MAX_MOVES], len: 0 }
-    }
-
-    #[inline(always)]
-    fn push(&mut self, m: Move) {
-        self.moves[self.len] = m;
-        self.len += 1;
-    }
-
-    fn selection_sort(&mut self) {
-        for i in 0..self.len {
-            let mut best_idx = i;
-            let mut best_val = self.scores[i];
-            for j in (i + 1)..self.len {
-                if self.scores[j] > best_val {
-                    best_val = self.scores[j];
-                    best_idx = j;
-                }
-            }
-            if best_idx != i {
-                self.moves.swap(i, best_idx);
-                self.scores.swap(i, best_idx);
-            }
-        }
-    }
-}
 
 const TT_BITS: usize = 20;
 const TT_SIZE: usize = 1 << TT_BITS;
@@ -165,8 +117,8 @@ struct TTEntry {
     to: u8,
     path_kind: u8,
     stop_idx: u8,
-    special: u8,
-    promo: u8,
+    special: SpecialMove,
+    promo: PieceType,
 }
 
 fn tt_to_move(e: &TTEntry) -> Move {
@@ -175,21 +127,8 @@ fn tt_to_move(e: &TTEntry) -> Move {
         to: e.to,
         path_kind: e.path_kind,
         stop_index: e.stop_idx,
-        special: match e.special {
-            1 => SpecialMove::Castle,
-            2 => SpecialMove::EnPassant,
-            3 => SpecialMove::Promotion,
-            _ => SpecialMove::None,
-        },
-        promo_piece: match e.promo {
-            1 => PieceType::Pawn,
-            2 => PieceType::Knight,
-            3 => PieceType::Bishop,
-            4 => PieceType::Rook,
-            5 => PieceType::Queen,
-            6 => PieceType::King,
-            _ => PieceType::None,
-        },
+        special: e.special,
+        promo_piece: e.promo,
     }
 }
 
@@ -199,13 +138,20 @@ fn history_idx(color: usize, from: usize, to: usize) -> usize {
     color * 64 * 64 + from * 64 + to
 }
 
-struct LmrTable { table: [[i32; 256]; 32] }
+struct LmrTable {
+    table: [[i32; 256]; 32],
+}
 static LMR: LazyLock<LmrTable> = LazyLock::new(|| {
-    let mut t = LmrTable { table: [[0i32; 256]; 32] };
+    let mut t = LmrTable {
+        table: [[0i32; 256]; 32],
+    };
     for d in 0..32 {
         for m in 0..256 {
-            t.table[d][m] = if d < 2 || m < 3 { 0 }
-            else { (0.5 + (d as f64).ln() * (m as f64).ln() / 1.8) as i32 };
+            t.table[d][m] = if d < 2 || m < 3 {
+                0
+            } else {
+                (0.5 + (d as f64).ln() * (m as f64).ln() / 1.8) as i32
+            };
         }
     }
     t
@@ -250,9 +196,19 @@ impl OmegaEngine {
             countermove: [[Move::default(); 64]; 64],
             prev_move: Move::default(),
             move_buf: Vec::new(),
-            nodes: 0, qnodes: 0, beta_cuts: 0, first_cuts: 0, tt_hits: 0,
-            null_cuts: 0, lmr_tries: 0, lmr_re: 0, lazy_cuts: 0, max_ply: 0,
-            stopped: false, budget_max_time_us: 0, t0: Instant::now(),
+            nodes: 0,
+            qnodes: 0,
+            beta_cuts: 0,
+            first_cuts: 0,
+            tt_hits: 0,
+            null_cuts: 0,
+            lmr_tries: 0,
+            lmr_re: 0,
+            lazy_cuts: 0,
+            max_ply: 0,
+            stopped: false,
+            budget_max_time_us: 0,
+            t0: Instant::now(),
         }
     }
 
@@ -261,11 +217,14 @@ impl OmegaEngine {
     }
 
     fn check_time(&mut self) -> bool {
-        if self.stopped { return true; }
-        if self.budget_max_time_us > 0 && (self.nodes & 255) == 0 {
-            if self.elapsed_us() >= self.budget_max_time_us * 9 / 10 {
-                self.stopped = true;
-            }
+        if self.stopped {
+            return true;
+        }
+        if self.budget_max_time_us > 0
+            && (self.nodes & 255) == 0
+            && self.elapsed_us() >= self.budget_max_time_us * 9 / 10
+        {
+            self.stopped = true;
         }
         self.stopped
     }
@@ -278,9 +237,13 @@ impl OmegaEngine {
             e.key32 = k32;
             e.score = score.clamp(-32000, 32000) as i16;
             e.depth = depth.min(255) as u8;
-            e.flag = flag; e.from = m.from; e.to = m.to;
-            e.path_kind = m.path_kind; e.stop_idx = m.stop_index;
-            e.special = m.special as u8; e.promo = m.promo_piece as u8;
+            e.flag = flag;
+            e.from = m.from;
+            e.to = m.to;
+            e.path_kind = m.path_kind;
+            e.stop_idx = m.stop_index;
+            e.special = m.special;
+            e.promo = m.promo_piece;
         }
     }
 
@@ -315,7 +278,9 @@ impl OmegaEngine {
         // === PASS 1: Material, PST, piece-specific eval (singularity's push eval) ===
         for sq in 0u8..64 {
             let p = pos.board[sq as usize];
-            if p.is_empty() { continue; }
+            if p.is_empty() {
+                continue;
+            }
 
             let c = p.color;
             let ci = c as usize;
@@ -329,31 +294,47 @@ impl OmegaEngine {
 
             // Collect data for phantom's post-loop eval
             if pt == PieceType::Pawn {
-                if pawn_n[ci] < 8 { pawn_sq[ci][pawn_n[ci]] = sq; pawn_n[ci] += 1; }
+                if pawn_n[ci] < 8 {
+                    pawn_sq[ci][pawn_n[ci]] = sq;
+                    pawn_n[ci] += 1;
+                }
                 pawn_files[ci] |= 1 << f;
                 // Passed pawn (from phantom)
                 let adv = if c == Color::White { r } else { 7 - r };
                 let mut passed = true;
                 let dir: i32 = if c == Color::White { 1 } else { -1 };
                 let mut fr = r + dir;
-                'pp: while fr >= 0 && fr < 8 {
+                'pp: while (0..8).contains(&fr) {
                     for df in -1..=1i32 {
                         let ff = f + df;
-                        if ff < 0 || ff > 7 { continue; }
+                        if !(0..=7).contains(&ff) {
+                            continue;
+                        }
                         let cp = pos.board[(fr * 8 + ff) as usize];
-                        if cp.piece_type == PieceType::Pawn && cp.color != c { passed = false; break 'pp; }
+                        if cp.piece_type == PieceType::Pawn && cp.color != c {
+                            passed = false;
+                            break 'pp;
+                        }
                     }
                     fr += dir;
                 }
-                if passed { score += sign * (adv * 15); }
+                if passed {
+                    score += sign * (adv * 15);
+                }
             }
-            if pt == PieceType::King { king[ci] = sq; }
-            if pt == PieceType::Bishop { bishop_count[ci] += 1; }
-            if pt == PieceType::Rook || pt == PieceType::Queen {
-                if slider_n[ci] < 16 { slider_sq[ci][slider_n[ci]] = sq; slider_n[ci] += 1; }
+            if pt == PieceType::King {
+                king[ci] = sq;
             }
-            if pt != PieceType::Pawn && pt != PieceType::King {
-                if piece_n[ci] < 16 { piece_sq[ci][piece_n[ci]] = sq; piece_n[ci] += 1; }
+            if pt == PieceType::Bishop {
+                bishop_count[ci] += 1;
+            }
+            if (pt == PieceType::Rook || pt == PieceType::Queen) && slider_n[ci] < 16 {
+                slider_sq[ci][slider_n[ci]] = sq;
+                slider_n[ci] += 1;
+            }
+            if pt != PieceType::Pawn && pt != PieceType::King && piece_n[ci] < 16 {
+                piece_sq[ci][piece_n[ci]] = sq;
+                piece_n[ci] += 1;
             }
 
             // === Singularity's exact push mobility (the key innovation) ===
@@ -361,15 +342,20 @@ impl OmegaEngine {
                 PieceType::Knight => {
                     let mut mob = 0;
                     for &(dr, df) in &KNIGHT_OFFSETS {
-                        let nr = r + dr; let nf = f + df;
+                        let nr = r + dr;
+                        let nf = f + df;
                         if valid_rf(nr, nf) {
                             let target = pos.board[(nr * 8 + nf) as usize];
-                            if target.is_empty() { mob += 1; }
-                            else if target.color != c { mob += 1; score += sign * 10; }
+                            if target.is_empty() {
+                                mob += 1;
+                            } else if target.color != c {
+                                mob += 1;
+                                score += sign * 10;
+                            }
                         }
                     }
                     score += sign * mob * 4;
-                },
+                }
                 PieceType::Bishop | PieceType::Rook | PieceType::Queen => {
                     let dirs: &[(i32, i32)] = match pt {
                         PieceType::Bishop => &BISHOP_DIRS,
@@ -382,19 +368,27 @@ impl OmegaEngine {
                         for dist in 1..=7 {
                             let nr = r + dr * dist;
                             let nf = f + dc * dist;
-                            if !valid_rf(nr, nf) { break; }
+                            if !valid_rf(nr, nf) {
+                                break;
+                            }
                             let to = make_square(nr, nf);
-                            let info = resolve_push(pos, sq, to, dr, dc);
-                            if info.result == PushResult::Illegal { break; }
+                            let Some(info) = resolve_push(pos, sq, to, dr, dc) else {
+                                break;
+                            };
                             mob += 1;
-                            if info.num_displacements > 1 { pushes += 1; }
-                            if info.result == PushResult::Capture { score += sign * 15; break; }
+                            if info.displacements().len() > 1 {
+                                pushes += 1;
+                            }
+                            if info.captured().is_some() {
+                                score += sign * 15;
+                                break;
+                            }
                         }
                     }
                     let w = if pt == PieceType::Queen { 2 } else { 3 };
                     score += sign * mob * w;
                     score += sign * pushes * 6;
-                },
+                }
                 PieceType::Pawn => {
                     // Pawn attack influence (from singularity)
                     let dr = if c == Color::White { 1 } else { -1 };
@@ -402,25 +396,37 @@ impl OmegaEngine {
                         let nf = f + df;
                         if valid_rf(r + dr, nf) {
                             let target = pos.board[((r + dr) * 8 + nf) as usize];
-                            if !target.is_empty() && target.color != c { score += sign * 8; }
+                            if !target.is_empty() && target.color != c {
+                                score += sign * 8;
+                            }
                         }
                     }
                     // Connected pawns (from singularity)
                     let mut connected = false;
                     for df in [-1i32, 1] {
                         let nf = f + df;
-                        if nf >= 0 && nf < 8 {
+                        if (0..8).contains(&nf) {
                             let ns1 = (r * 8 + nf) as usize;
-                            if pos.board[ns1].piece_type == PieceType::Pawn && pos.board[ns1].color == c { connected = true; }
+                            if pos.board[ns1].piece_type == PieceType::Pawn
+                                && pos.board[ns1].color == c
+                            {
+                                connected = true;
+                            }
                             let nr2 = r - dr;
-                            if nr2 >= 0 && nr2 < 8 {
+                            if (0..8).contains(&nr2) {
                                 let ns2 = (nr2 * 8 + nf) as usize;
-                                if pos.board[ns2].piece_type == PieceType::Pawn && pos.board[ns2].color == c { connected = true; }
+                                if pos.board[ns2].piece_type == PieceType::Pawn
+                                    && pos.board[ns2].color == c
+                                {
+                                    connected = true;
+                                }
                             }
                         }
                     }
-                    if connected { score += sign * 15; }
-                },
+                    if connected {
+                        score += sign * 15;
+                    }
+                }
                 _ => {}
             }
         }
@@ -433,20 +439,35 @@ impl OmegaEngine {
             let sign = if c == stm { 1 } else { -1 };
             for pi in 0..pawn_n[ci] {
                 let psq = pawn_sq[ci][pi] as i32;
-                let pr = psq >> 3; let pf = psq & 7;
+                let pr = psq >> 3;
+                let pf = psq & 7;
                 let adv = if c == Color::White { pr } else { 7 - pr };
-                if adv < 4 { continue; }
+                if adv < 4 {
+                    continue;
+                }
                 for si in 0..slider_n[ci] {
                     let ssq = slider_sq[ci][si] as i32;
-                    if (ssq & 7) != pf { continue; }
+                    if (ssq & 7) != pf {
+                        continue;
+                    }
                     let sr = ssq >> 3;
                     let behind = if c == Color::White { sr < pr } else { sr > pr };
-                    if !behind { continue; }
+                    if !behind {
+                        continue;
+                    }
                     let dir: i32 = if c == Color::White { 1 } else { -1 };
                     let mut clear = true;
                     let mut cr = sr + dir;
-                    while cr != pr { if !pos.board[(cr * 8 + pf) as usize].is_empty() { clear = false; break; } cr += dir; }
-                    if !clear { continue; }
+                    while cr != pr {
+                        if !pos.board[(cr * 8 + pf) as usize].is_empty() {
+                            clear = false;
+                            break;
+                        }
+                        cr += dir;
+                    }
+                    if !clear {
+                        continue;
+                    }
                     score += sign * (if adv >= 5 { 150 } else { 60 });
                     break;
                 }
@@ -457,32 +478,46 @@ impl OmegaEngine {
         for ci in 0..2usize {
             let oci = 1 - ci;
             let sign = if ci == stm as usize { 1 } else { -1 };
-            let kr = (king[ci] >> 3) as i32; let kf = (king[ci] & 7) as i32;
+            let kr = (king[ci] >> 3) as i32;
+            let kf = (king[ci] & 7) as i32;
             let mut attackers = 0;
             let mut attack_weight = 0;
             for pi in 0..piece_n[oci] {
                 let psq = piece_sq[oci][pi] as i32;
-                let pr = psq >> 3; let pf = psq & 7;
+                let pr = psq >> 3;
+                let pf = psq & 7;
                 let dist = (kr - pr).abs().max((kf - pf).abs());
                 if dist <= 2 {
                     attackers += 1;
                     let pt = pos.board[psq as usize].piece_type;
-                    if pt == PieceType::Queen { attack_weight += 4; }
-                    else if pt == PieceType::Rook { attack_weight += 3; }
-                    else { attack_weight += 2; }
+                    if pt == PieceType::Queen {
+                        attack_weight += 4;
+                    } else if pt == PieceType::Rook {
+                        attack_weight += 3;
+                    } else {
+                        attack_weight += 2;
+                    }
                 }
             }
-            if attackers >= 2 { score -= sign * (attack_weight * attack_weight * 3); }
-            else if attackers == 1 { score -= sign * (attack_weight * 8); }
+            if attackers >= 2 {
+                score -= sign * (attack_weight * attack_weight * 3);
+            } else if attackers == 1 {
+                score -= sign * (attack_weight * 8);
+            }
 
             // King tropism
             for pi in 0..pawn_n[oci] {
                 let psq = pawn_sq[oci][pi] as i32;
-                let pr = psq >> 3; let pf = psq & 7;
+                let pr = psq >> 3;
+                let pf = psq & 7;
                 let adv = if oci == 0 { pr } else { 7 - pr };
-                if adv < 4 { continue; }
+                if adv < 4 {
+                    continue;
+                }
                 let dist = (kr - pr).abs().max((kf - pf).abs());
-                if dist <= 2 { score -= sign * (20 + adv * 8); }
+                if dist <= 2 {
+                    score -= sign * (20 + adv * 8);
+                }
             }
         }
 
@@ -490,26 +525,43 @@ impl OmegaEngine {
         for ci in 0..2usize {
             let c = if ci == 0 { Color::White } else { Color::Black };
             let sign = if c == stm { 1 } else { -1 };
-            let kr = (king[ci] >> 3) as i32; let kf = (king[ci] & 7) as i32;
+            let kr = (king[ci] >> 3) as i32;
+            let kf = (king[ci] & 7) as i32;
             let shield_dir: i32 = if c == Color::White { 1 } else { -1 };
             for pi in 0..pawn_n[ci] {
                 let psq = pawn_sq[ci][pi] as i32;
-                let pr = psq >> 3; let pf = psq & 7;
+                let pr = psq >> 3;
+                let pf = psq & 7;
                 let file_dist = (pf - kf).abs();
                 let rank_ahead = (pr - kr) * shield_dir;
-                if file_dist <= 1 && rank_ahead >= 1 && rank_ahead <= 2 { score += sign * 15; }
+                if file_dist <= 1 && (1..=2).contains(&rank_ahead) {
+                    score += sign * 15;
+                }
             }
             let mut pawns_near_king = 0;
             for pi in 0..pawn_n[ci] {
                 let psq = pawn_sq[ci][pi] as i32;
                 let dist = ((psq >> 3) - kr).abs().max(((psq & 7) - kf).abs());
-                if dist <= 2 { pawns_near_king += 1; }
+                if dist <= 2 {
+                    pawns_near_king += 1;
+                }
             }
-            if pawns_near_king < 2 { score += sign * (-50); }
+            if pawns_near_king < 2 {
+                score += sign * (-50);
+            }
             let mut has_pawn_on_file = false;
-            for pi in 0..pawn_n[ci] { if (pawn_sq[ci][pi] & 7) as i32 == kf { has_pawn_on_file = true; break; } }
-            if !has_pawn_on_file { score += sign * (-30); }
-            if bishop_count[ci] >= 2 { score += sign * 40; }
+            for pi in 0..pawn_n[ci] {
+                if (pawn_sq[ci][pi] & 7) as i32 == kf {
+                    has_pawn_on_file = true;
+                    break;
+                }
+            }
+            if !has_pawn_on_file {
+                score += sign * (-30);
+            }
+            if bishop_count[ci] >= 2 {
+                score += sign * 40;
+            }
         }
 
         // Rook bonuses (from phantom)
@@ -519,14 +571,21 @@ impl OmegaEngine {
             let mut prev_rook_rank: i32 = -1;
             for si in 0..slider_n[ci] {
                 let ssq = slider_sq[ci][si];
-                if pos.board[ssq as usize].piece_type != PieceType::Rook { continue; }
+                if pos.board[ssq as usize].piece_type != PieceType::Rook {
+                    continue;
+                }
                 let sf = (ssq & 7) as i32;
                 let sr = (ssq >> 3) as i32;
                 let friendly_pawn = (pawn_files[ci] >> sf) & 1 != 0;
                 let enemy_pawn = (pawn_files[1 - ci] >> sf) & 1 != 0;
-                if !friendly_pawn && !enemy_pawn { score += sign * 25; }
-                else if !friendly_pawn { score += sign * 15; }
-                if prev_rook_rank == sr { score += sign * 15; }
+                if !friendly_pawn && !enemy_pawn {
+                    score += sign * 25;
+                } else if !friendly_pawn {
+                    score += sign * 15;
+                }
+                if prev_rook_rank == sr {
+                    score += sign * 15;
+                }
                 prev_rook_rank = sr;
             }
         }
@@ -538,12 +597,24 @@ impl OmegaEngine {
             for pi in 0..pawn_n[ci] {
                 let pf = (pawn_sq[ci][pi] & 7) as i32;
                 let mut on_file = 0;
-                for pj in 0..pawn_n[ci] { if (pawn_sq[ci][pj] & 7) as i32 == pf { on_file += 1; } }
-                if on_file > 1 { score += sign * (-10); }
+                for pj in 0..pawn_n[ci] {
+                    if (pawn_sq[ci][pj] & 7) as i32 == pf {
+                        on_file += 1;
+                    }
+                }
+                if on_file > 1 {
+                    score += sign * (-10);
+                }
                 let mut has_neighbor = false;
-                if pf > 0 && (pawn_files[ci] >> (pf - 1)) & 1 != 0 { has_neighbor = true; }
-                if pf < 7 && (pawn_files[ci] >> (pf + 1)) & 1 != 0 { has_neighbor = true; }
-                if !has_neighbor { score += sign * (-15); }
+                if pf > 0 && (pawn_files[ci] >> (pf - 1)) & 1 != 0 {
+                    has_neighbor = true;
+                }
+                if pf < 7 && (pawn_files[ci] >> (pf + 1)) & 1 != 0 {
+                    has_neighbor = true;
+                }
+                if !has_neighbor {
+                    score += sign * (-15);
+                }
             }
         }
 
@@ -553,13 +624,15 @@ impl OmegaEngine {
     fn order_moves(&self, pos: &Position, ml: &mut MoveList, ply: usize, ttm: &Move) {
         let cm = if self.prev_move.from != 0 || self.prev_move.to != 0 {
             self.countermove[self.prev_move.from as usize][self.prev_move.to as usize]
-        } else { Move::default() };
+        } else {
+            Move::default()
+        };
 
-        for i in 0..ml.len {
-            let m = &ml.moves[i];
-            let s: i32;
-            if *m == *ttm {
-                s = 10_000_000;
+        for i in 0..ml.len() {
+            let m = &ml[i].mv;
+
+            let s: i32 = if *m == *ttm {
+                10_000_000
             } else {
                 let mut sv: i32 = 0;
                 let mpt = pos.board[m.from as usize].piece_type;
@@ -568,32 +641,58 @@ impl OmegaEngine {
                 if !pos.board[m.to as usize].is_empty() {
                     sv += 100_000 + pval(pos.board[m.to as usize].piece_type) * 10 - pval(mpt);
                 }
-                if m.special == SpecialMove::Promotion { sv += 95_000 + pval(m.promo_piece); }
+                if m.special == SpecialMove::Promotion {
+                    sv += 95_000 + pval(m.promo_piece);
+                }
 
                 sv += pst_value(mpt, mc, m.to) - pst_value(mpt, mc, m.from);
 
                 if ply < 64 {
-                    if *m == self.killers[ply][0] { sv += 80_000; }
-                    else if *m == self.killers[ply][1] { sv += 79_000; }
+                    if *m == self.killers[ply][0] {
+                        sv += 80_000;
+                    } else if *m == self.killers[ply][1] {
+                        sv += 79_000;
+                    }
                 }
-                if *m == cm { sv += 60_000; }
-                sv += self.history[history_idx(pos.side_to_move as usize, m.from as usize, m.to as usize)] as i32;
-                s = sv;
-            }
-            ml.scores[i] = s;
+                if *m == cm {
+                    sv += 60_000;
+                }
+                sv += self.history
+                    [history_idx(pos.side_to_move as usize, m.from as usize, m.to as usize)]
+                    as i32;
+                sv
+            };
+            ml[i].score = s;
         }
         ml.selection_sort();
     }
 
-    fn search(&mut self, pos: &mut Position, depth: i32, mut alpha: i32, mut beta: i32, ply: i32, in_check: bool, is_pv: bool) -> i32 {
-        if self.check_time() { return 0; }
+    fn search(
+        &mut self,
+        pos: &mut Position,
+        depth: i32,
+        mut alpha: i32,
+        mut beta: i32,
+        ply: i32,
+        in_check: bool,
+        is_pv: bool,
+    ) -> i32 {
+        if self.check_time() {
+            return 0;
+        }
         self.nodes += 1;
-        if ply as u32 > self.max_ply { self.max_ply = ply as u32; }
-        if ply >= 128 { return self.evaluate(pos); }
+        if ply as u32 > self.max_ply {
+            self.max_ply = ply as u32;
+        }
+        if ply >= 128 {
+            return self.evaluate(pos);
+        }
 
         alpha = alpha.max(-99000 + ply);
         beta = beta.min(99000 - ply - 1);
-        if alpha >= beta { return alpha; }
+        if alpha >= beta {
+            return alpha;
+        }
 
         let key = pos.zobrist;
         let idx = (key as usize) & TT_MASK;
@@ -606,14 +705,22 @@ impl OmegaEngine {
                 ttm = tt_to_move(e);
                 if e.depth as i32 >= depth && !is_pv {
                     self.tt_hits += 1;
-                    if e.flag == 0 { return e.score as i32; }
-                    if e.flag == 2 && e.score as i32 >= beta { return e.score as i32; }
-                    if e.flag == 1 && e.score as i32 <= alpha { return e.score as i32; }
+                    if e.flag == 0 {
+                        return e.score as i32;
+                    }
+                    if e.flag == 2 && e.score as i32 >= beta {
+                        return e.score as i32;
+                    }
+                    if e.flag == 1 && e.score as i32 <= alpha {
+                        return e.score as i32;
+                    }
                 }
             }
         }
 
-        if depth <= 0 { return self.qsearch(pos, alpha, beta, 0); }
+        if depth <= 0 {
+            return self.qsearch(pos, alpha, beta, 0);
+        }
 
         // Null Move Pruning
         if !is_pv && !in_check && ply > 0 && depth >= 3 {
@@ -630,7 +737,15 @@ impl OmegaEngine {
             }
 
             let r = if depth >= 6 { 3 } else { 2 };
-            let null_score = -self.search(pos, depth - 1 - r, -beta, -(beta - 1), ply + 1, false, false);
+            let null_score = -self.search(
+                pos,
+                depth - 1 - r,
+                -beta,
+                -(beta - 1),
+                ply + 1,
+                false,
+                false,
+            );
 
             pos.side_to_move = saved_stm;
             pos.ep_square = saved_ep;
@@ -658,7 +773,9 @@ impl OmegaEngine {
             }
             if depth <= 2 && eval + 300 < alpha {
                 let qs = self.qsearch(pos, alpha, beta, 0);
-                if qs < alpha { return qs; }
+                if qs < alpha {
+                    return qs;
+                }
             }
         }
 
@@ -666,7 +783,9 @@ impl OmegaEngine {
         if ttm.from == 0 && ttm.to == 0 && depth >= 4 && !self.stopped {
             self.search(pos, depth - 2, alpha, beta, ply, in_check, is_pv);
             let e = &self.tt[idx];
-            if e.key32 == k32 { ttm = tt_to_move(e); }
+            if e.key32 == k32 {
+                ttm = tt_to_move(e);
+            }
         }
 
         let mut ml = MoveList::new();
@@ -674,26 +793,35 @@ impl OmegaEngine {
             let mut buf = std::mem::take(&mut self.move_buf);
             buf.clear();
             generate_legal_moves(pos, &mut buf);
-            for m in &buf { ml.push(*m); }
+            for m in &buf {
+                ml.push(*m);
+            }
             self.move_buf = buf;
         }
 
-        if ml.len == 0 { return if in_check { -99000 + ply } else { 0 }; }
+        if ml.is_empty() {
+            return if in_check { -99000 + ply } else { 0 };
+        }
         self.order_moves(pos, &mut ml, ply as usize, &ttm);
 
         let saved_prev = self.prev_move;
-        let mut best_move = ml.moves[0];
+        let mut best_move = ml[0].mv;
         let mut best_score = -100000i32;
         let mut flag: u8 = 1;
 
-        for i in 0..ml.len {
-            if self.stopped { break; }
-            let m = ml.moves[i];
+        for i in 0..ml.len() {
+            if self.stopped {
+                break;
+            }
+            let m = ml[i].mv;
 
             let is_tactical = !pos.board[m.to as usize].is_empty()
-                || m.special == SpecialMove::Promotion || m.special == SpecialMove::EnPassant;
+                || m.special == SpecialMove::Promotion
+                || m.special == SpecialMove::EnPassant;
 
-            if !is_tactical && !in_check && depth <= 2 && i as i32 >= 8 + depth * 4 { continue; }
+            if !is_tactical && !in_check && depth <= 2 && i as i32 >= 8 + depth * 4 {
+                continue;
+            }
 
             self.prev_move = m;
             pos.make_move(&m);
@@ -708,33 +836,82 @@ impl OmegaEngine {
                 let mut r = LMR.table[d][mi].clamp(1, depth - 1);
                 let ci = opponent(pos.side_to_move) as usize;
                 let hscore = self.history[history_idx(ci, m.from as usize, m.to as usize)] as i32;
-                if hscore < -500 { r += 2; }
-                else if hscore < -100 { r += 1; }
+                if hscore < -500 {
+                    r += 2;
+                } else if hscore < -100 {
+                    r += 1;
+                }
                 r = r.clamp(1, depth - 1);
 
-                let s0 = -self.search(pos, depth - 1 - r, -(alpha + 1), -alpha, ply + 1, gives_check, false);
+                let s0 = -self.search(
+                    pos,
+                    depth - 1 - r,
+                    -(alpha + 1),
+                    -alpha,
+                    ply + 1,
+                    gives_check,
+                    false,
+                );
                 if s0 > alpha && !self.stopped {
                     self.lmr_re += 1;
-                    score = -self.search(pos, depth - 1, -beta, -alpha, ply + 1, gives_check, is_pv);
-                } else { score = s0; }
+                    score =
+                        -self.search(pos, depth - 1, -beta, -alpha, ply + 1, gives_check, is_pv);
+                } else {
+                    score = s0;
+                }
             } else {
                 let ext = if gives_check && depth <= 4 { 1 } else { 0 };
                 if i > 0 && !self.stopped {
-                    let s1 = -self.search(pos, depth - 1 + ext, -(alpha + 1), -alpha, ply + 1, gives_check, false);
+                    let s1 = -self.search(
+                        pos,
+                        depth - 1 + ext,
+                        -(alpha + 1),
+                        -alpha,
+                        ply + 1,
+                        gives_check,
+                        false,
+                    );
                     if s1 > alpha && s1 < beta && !self.stopped {
-                        score = -self.search(pos, depth - 1 + ext, -beta, -alpha, ply + 1, gives_check, is_pv);
-                    } else { score = s1; }
+                        score = -self.search(
+                            pos,
+                            depth - 1 + ext,
+                            -beta,
+                            -alpha,
+                            ply + 1,
+                            gives_check,
+                            is_pv,
+                        );
+                    } else {
+                        score = s1;
+                    }
                 } else {
-                    score = -self.search(pos, depth - 1 + ext, -beta, -alpha, ply + 1, gives_check, is_pv);
+                    score = -self.search(
+                        pos,
+                        depth - 1 + ext,
+                        -beta,
+                        -alpha,
+                        ply + 1,
+                        gives_check,
+                        is_pv,
+                    );
                 }
             }
             pos.unmake_move();
 
-            if score > best_score { best_score = score; best_move = m; }
-            if score > alpha { alpha = score; flag = 0; }
+            if score > best_score {
+                best_score = score;
+                best_move = m;
+            }
+            if score > alpha {
+                alpha = score;
+                flag = 0;
+            }
             if alpha >= beta {
-                flag = 2; self.beta_cuts += 1;
-                if i == 0 { self.first_cuts += 1; }
+                flag = 2;
+                self.beta_cuts += 1;
+                if i == 0 {
+                    self.first_cuts += 1;
+                }
                 if !is_tactical && (ply as usize) < 64 {
                     self.killers[ply as usize][1] = self.killers[ply as usize][0];
                     self.killers[ply as usize][0] = m;
@@ -742,8 +919,9 @@ impl OmegaEngine {
                     let h = &mut self.history[history_idx(ci, m.from as usize, m.to as usize)];
                     *h = (*h + (depth * depth) as i16).min(16000);
                     for j in 0..i {
-                        if pos.board[ml.moves[j].to as usize].is_empty() {
-                            let hh = &mut self.history[history_idx(ci, ml.moves[j].from as usize, ml.moves[j].to as usize)];
+                        if pos.board[ml[j].mv.to as usize].is_empty() {
+                            let hh = &mut self.history
+                                [history_idx(ci, ml[j].mv.from as usize, ml[j].mv.to as usize)];
                             *hh = (*hh - depth as i16).max(-16000);
                         }
                     }
@@ -756,19 +934,32 @@ impl OmegaEngine {
         }
 
         self.prev_move = saved_prev;
-        if !self.stopped { self.tt_store(key, depth, best_score, flag, &best_move); }
+        if !self.stopped {
+            self.tt_store(key, depth, best_score, flag, &best_move);
+        }
         best_score
     }
 
     fn qsearch(&mut self, pos: &mut Position, mut alpha: i32, beta: i32, qdepth: i32) -> i32 {
-        if self.check_time() { return 0; }
-        self.nodes += 1; self.qnodes += 1;
-        if qdepth >= 4 { return self.evaluate(pos); }
+        if self.check_time() {
+            return 0;
+        }
+        self.nodes += 1;
+        self.qnodes += 1;
+        if qdepth >= 4 {
+            return self.evaluate(pos);
+        }
 
         let stand_pat = self.evaluate(pos);
-        if stand_pat >= beta { return stand_pat; }
-        if stand_pat > alpha { alpha = stand_pat; }
-        if stand_pat + 1000 < alpha { return alpha; }
+        if stand_pat >= beta {
+            return stand_pat;
+        }
+        if stand_pat > alpha {
+            alpha = stand_pat;
+        }
+        if stand_pat + 1000 < alpha {
+            return alpha;
+        }
 
         let mut buf = std::mem::take(&mut self.move_buf);
         buf.clear();
@@ -778,11 +969,19 @@ impl OmegaEngine {
         let mut nt: usize = 0;
 
         for m in &buf {
-            let tac = !pos.board[m.to as usize].is_empty() || m.special == SpecialMove::Promotion || m.special == SpecialMove::EnPassant;
-            if !tac { continue; }
+            let tac = !pos.board[m.to as usize].is_empty()
+                || m.special == SpecialMove::Promotion
+                || m.special == SpecialMove::EnPassant;
+            if !tac {
+                continue;
+            }
             let mut see = pval(pos.board[m.to as usize].piece_type);
-            if m.special == SpecialMove::Promotion { see += 800; }
-            if stand_pat + see + 200 < alpha { continue; }
+            if m.special == SpecialMove::Promotion {
+                see += 800;
+            }
+            if stand_pat + see + 200 < alpha {
+                continue;
+            }
             if nt < 64 {
                 tactical[nt] = (*m, see);
                 nt += 1;
@@ -794,32 +993,47 @@ impl OmegaEngine {
             let mut best_idx = i;
             let mut best_val = tactical[i].1;
             for j in (i + 1)..nt {
-                if tactical[j].1 > best_val { best_val = tactical[j].1; best_idx = j; }
+                if tactical[j].1 > best_val {
+                    best_val = tactical[j].1;
+                    best_idx = j;
+                }
             }
-            if best_idx != i { tactical.swap(i, best_idx); }
+            if best_idx != i {
+                tactical.swap(i, best_idx);
+            }
         }
 
         for i in 0..nt {
             pos.make_move(&tactical[i].0);
             let score = -self.qsearch(pos, -beta, -alpha, qdepth + 1);
             pos.unmake_move();
-            if self.stopped { return 0; }
-            if score >= beta { return score; }
-            if score > alpha { alpha = score; }
+            if self.stopped {
+                return 0;
+            }
+            if score >= beta {
+                return score;
+            }
+            if score > alpha {
+                alpha = score;
+            }
         }
         alpha
     }
 
     fn dump_diag(&mut self, pos: &mut Position, root: &MoveList, stats: &mut SearchStats) {
         let mut ranked: Vec<(String, i32)> = Vec::new();
-        for i in 0..root.len {
-            let m = &root.moves[i];
+        for i in 0..root.len() {
+            let m = &root[i].mv;
             pos.make_move(m);
             let key = pos.zobrist;
             let idx = (key as usize) & TT_MASK;
             let k32 = (key >> 32) as u32;
             let e = &self.tt[idx];
-            let sc = if e.key32 == k32 { -(e.score as i32) } else { -self.evaluate(pos) };
+            let sc = if e.key32 == k32 {
+                -(e.score as i32)
+            } else {
+                -self.evaluate(pos)
+            };
             pos.unmake_move();
 
             let mut uci = String::new();
@@ -828,20 +1042,37 @@ impl OmegaEngine {
             uci.push((b'a' + (m.to & 7)) as char);
             uci.push((b'1' + (m.to >> 3)) as char);
             if m.special == SpecialMove::Promotion {
-                let p = match m.promo_piece { PieceType::Knight => 'n', PieceType::Bishop => 'b', PieceType::Rook => 'r', PieceType::Queen => 'q', _ => ' ' };
-                if p != ' ' { uci.push(p); }
+                let p = match m.promo_piece {
+                    PieceType::Knight => 'n',
+                    PieceType::Bishop => 'b',
+                    PieceType::Rook => 'r',
+                    PieceType::Queen => 'q',
+                    _ => ' ',
+                };
+                if p != ' ' {
+                    uci.push(p);
+                }
             }
             ranked.push((uci, sc));
         }
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        ranked.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         let cap = ranked.len().min(32);
 
         let mut diag = format!(
             r#"{{"engine":"omega_001","qn":{},"tt":{},"bcut":{},"fcut":{},"nmp":{},"lazy":{},"lmr":[{},{}],"top_moves":["#,
-            self.qnodes, self.tt_hits, self.beta_cuts, self.first_cuts, self.null_cuts, self.lazy_cuts, self.lmr_tries, self.lmr_re,
+            self.qnodes,
+            self.tt_hits,
+            self.beta_cuts,
+            self.first_cuts,
+            self.null_cuts,
+            self.lazy_cuts,
+            self.lmr_tries,
+            self.lmr_re,
         );
         for i in 0..cap {
-            if i > 0 { diag.push(','); }
+            if i > 0 {
+                diag.push(',');
+            }
             diag.push_str(&format!(r#"["{}",{}]"#, ranked[i].0, ranked[i].1));
         }
         diag.push_str("]}");
@@ -850,7 +1081,9 @@ impl OmegaEngine {
 }
 
 impl Engine for OmegaEngine {
-    fn name(&self) -> &str { "omega" }
+    fn name(&self) -> &str {
+        "omega"
+    }
 
     fn new_game(&mut self, my_color: Color, _game_seed: u64) {
         self.color = my_color;
@@ -864,9 +1097,17 @@ impl Engine for OmegaEngine {
     fn choose_move(&mut self, pos: &mut Position, budget: &SearchBudget) -> (Move, SearchStats) {
         self.t0 = Instant::now();
         self.budget_max_time_us = budget.max_time_us;
-        self.nodes = 0; self.qnodes = 0; self.max_ply = 0; self.stopped = false;
-        self.beta_cuts = 0; self.first_cuts = 0; self.tt_hits = 0;
-        self.null_cuts = 0; self.lmr_tries = 0; self.lmr_re = 0; self.lazy_cuts = 0;
+        self.nodes = 0;
+        self.qnodes = 0;
+        self.max_ply = 0;
+        self.stopped = false;
+        self.beta_cuts = 0;
+        self.first_cuts = 0;
+        self.tt_hits = 0;
+        self.null_cuts = 0;
+        self.lmr_tries = 0;
+        self.lmr_re = 0;
+        self.lazy_cuts = 0;
         self.prev_move = Move::default();
 
         let mut root = MoveList::new();
@@ -874,25 +1115,37 @@ impl Engine for OmegaEngine {
             let mut buf = std::mem::take(&mut self.move_buf);
             buf.clear();
             generate_legal_moves(pos, &mut buf);
-            for m in &buf { root.push(*m); }
+            for m in &buf {
+                root.push(*m);
+            }
             self.move_buf = buf;
         }
 
         let mut stats = SearchStats::default();
 
-        if root.len == 0 { return (Move::default(), stats); }
-        if root.len == 1 { stats.nodes = 1; stats.depth_reached = 0; return (root.moves[0], stats); }
+        if root.is_empty() {
+            return (Move::default(), stats);
+        }
+        if root.len() == 1 {
+            stats.nodes = 1;
+            stats.depth_reached = 0;
+            return (root[0].mv, stats);
+        }
 
-        let mut best = root.moves[0];
+        let mut best = root[0].mv;
         let mut best_score = -100000i32;
 
         for depth in 1..=30 {
-            if self.stopped { break; }
+            if self.stopped {
+                break;
+            }
             let (mut alpha, mut beta);
             if depth <= 3 || best_score.abs() > 5000 {
-                alpha = -100000; beta = 100000;
+                alpha = -100000;
+                beta = 100000;
             } else {
-                alpha = best_score - 50; beta = best_score + 50;
+                alpha = best_score - 50;
+                beta = best_score + 50;
             }
 
             let mut iter_best;
@@ -900,48 +1153,84 @@ impl Engine for OmegaEngine {
             let mut aspiration_fail = false;
 
             loop {
-                iter_best = root.moves[0];
+                iter_best = root[0].mv;
                 iter_best_score = -100000;
 
-                for i in 0..root.len {
-                    if root.moves[i] == best {
-                        if i != 0 { root.moves.swap(0, i); }
+                for i in 0..root.len() {
+                    if root[i].mv == best {
+                        if i != 0 {
+                            root.swap(0, i);
+                        }
                         break;
                     }
                 }
 
-                for i in 0..root.len {
-                    if self.stopped { break; }
-                    let m = root.moves[i];
+                for i in 0..root.len() {
+                    if self.stopped {
+                        break;
+                    }
+                    let m = root[i].mv;
                     self.prev_move = m;
                     pos.make_move(&m);
                     let gives_check = pos.in_check();
 
                     let score;
                     if i > 0 && !self.stopped {
-                        let s1 = -self.search(pos, depth - 1, -(alpha + 1), -alpha, 1, gives_check, false);
+                        let s1 = -self.search(
+                            pos,
+                            depth - 1,
+                            -(alpha + 1),
+                            -alpha,
+                            1,
+                            gives_check,
+                            false,
+                        );
                         if s1 > alpha && s1 < beta && !self.stopped {
-                            score = -self.search(pos, depth - 1, -beta, -alpha, 1, gives_check, true);
-                        } else { score = s1; }
+                            score =
+                                -self.search(pos, depth - 1, -beta, -alpha, 1, gives_check, true);
+                        } else {
+                            score = s1;
+                        }
                     } else {
                         score = -self.search(pos, depth - 1, -beta, -alpha, 1, gives_check, true);
                     }
                     pos.unmake_move();
 
-                    if self.stopped { break; }
+                    if self.stopped {
+                        break;
+                    }
 
-                    if score > iter_best_score { iter_best_score = score; iter_best = m; }
-                    if score > alpha { alpha = score; }
-                    if alpha >= beta { break; }
+                    if score > iter_best_score {
+                        iter_best_score = score;
+                        iter_best = m;
+                    }
+                    if score > alpha {
+                        alpha = score;
+                    }
+                    if alpha >= beta {
+                        break;
+                    }
                 }
 
-                if self.stopped { break; }
+                if self.stopped {
+                    break;
+                }
 
                 if iter_best_score <= (best_score - 50) && !aspiration_fail {
-                    alpha = (iter_best_score - 200).max(-100000); beta = 100000; aspiration_fail = true; continue;
+                    alpha = (iter_best_score - 200).max(-100000);
+                    beta = 100000;
+                    aspiration_fail = true;
+                    continue;
                 }
-                if iter_best_score >= (best_score + 50) && depth > 3 && best_score.abs() <= 5000 && !aspiration_fail {
-                    alpha = -100000; beta = (iter_best_score + 200).min(100000); aspiration_fail = true; continue;
+                if iter_best_score >= (best_score + 50)
+                    && depth > 3
+                    && best_score.abs() <= 5000
+                    && !aspiration_fail
+                {
+                    alpha = -100000;
+                    beta = (iter_best_score + 200).min(100000);
+                    aspiration_fail = true;
+                    continue;
                 }
                 break;
             }
@@ -956,18 +1245,21 @@ impl Engine for OmegaEngine {
 
         if best_score <= -90000 {
             let mut bs = -100000i32;
-            for i in 0..root.len {
-                pos.make_move(&root.moves[i]);
+            for i in 0..root.len() {
+                pos.make_move(&root[i].mv);
                 let sc = -self.evaluate(pos);
                 pos.unmake_move();
-                if sc > bs { bs = sc; best = root.moves[i]; }
+                if sc > bs {
+                    bs = sc;
+                    best = root[i].mv;
+                }
             }
         }
 
         // Move validation
         let mut fresh = Vec::new();
         generate_legal_moves(pos, &mut fresh);
-        if !fresh.iter().any(|m| *m == best) {
+        if !fresh.contains(&best) {
             best = fresh.first().copied().unwrap_or_default();
         }
 
@@ -981,28 +1273,43 @@ impl Engine for OmegaEngine {
         let mut sn = 0;
         let mut depth_t = 0;
         loop {
-            if depth_t >= 32 { break; }
+            if depth_t >= 32 {
+                break;
+            }
             let key = pos.zobrist;
-            if seen[..sn].iter().any(|&k| k == key) { break; }
-            if sn < 32 { seen[sn] = key; sn += 1; }
+            if seen[..sn].contains(&key) {
+                break;
+            }
+            if sn < 32 {
+                seen[sn] = key;
+                sn += 1;
+            }
 
             let e = &self.tt[(key as usize) & TT_MASK];
-            if e.key32 != (key >> 32) as u32 { break; }
+            if e.key32 != (key >> 32) as u32 {
+                break;
+            }
             let m = tt_to_move(e);
-            if m.from >= 64 || m.to >= 64 || pos.board[m.from as usize].is_empty() { break; }
+            if m.from >= 64 || m.to >= 64 || pos.board[m.from as usize].is_empty() {
+                break;
+            }
 
             let mut buf = std::mem::take(&mut self.move_buf);
             buf.clear();
             generate_legal_moves(pos, &mut buf);
-            let found = buf.iter().any(|lm| *lm == m);
+            let found = buf.contains(&m);
             self.move_buf = buf;
-            if !found { break; }
+            if !found {
+                break;
+            }
 
             stats.pv.push(m);
             pos.make_move(&m);
             depth_t += 1;
         }
-        for _ in 0..depth_t { pos.unmake_move(); }
+        for _ in 0..depth_t {
+            pos.unmake_move();
+        }
 
         self.dump_diag(pos, &root, &mut stats);
         (best, stats)

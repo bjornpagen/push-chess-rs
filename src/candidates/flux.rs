@@ -17,45 +17,12 @@
 use std::sync::LazyLock;
 use std::time::Instant;
 
-#[cfg(target_arch = "aarch64")]
-use std::arch::aarch64::*;
+use super::support::find_max_index;
 
-use crate::core::types::*;
-use crate::core::position::Position;
 use crate::core::movegen::generate_legal_moves;
+use crate::core::position::Position;
+use crate::core::types::*;
 use crate::engine::Engine;
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn neon_find_max_index(scores: &[f32], start: usize, len: usize) -> usize {
-    unsafe {
-        let ptr = scores.as_ptr().add(start);
-        let count = len - start;
-        let chunks = count / 4;
-        let mut vmax = vld1q_f32(ptr);
-        for i in 1..chunks { vmax = vmaxq_f32(vmax, vld1q_f32(ptr.add(i * 4))); }
-        let mut max_val = vmaxvq_f32(vmax);
-        for i in (chunks * 4)..count { let v = *ptr.add(i); if v > max_val { max_val = v; } }
-        let target = vdupq_n_f32(max_val);
-        for i in 0..chunks {
-            let cmp = vceqq_f32(vld1q_f32(ptr.add(i * 4)), target);
-            let mask: [u32; 4] = std::mem::transmute(cmp);
-            for lane in 0..4 { if mask[lane] != 0 { return start + i * 4 + lane; } }
-        }
-        for i in (chunks * 4)..count { if *ptr.add(i) == max_val { return start + i; } }
-        start
-    }
-}
-
-#[inline]
-fn find_max_index(scores: &[f32], start: usize, len: usize) -> usize {
-    if len <= start { return start; }
-    #[cfg(target_arch = "aarch64")]
-    { if len - start >= 4 { return unsafe { neon_find_max_index(scores, start, len) }; } }
-    let (mut best_idx, mut best_val) = (start, scores[start]);
-    for j in (start + 1)..len { if scores[j] > best_val { best_val = scores[j]; best_idx = j; } }
-    best_idx
-}
 
 // -----------------------------------------------------------------------
 // TT
@@ -75,8 +42,8 @@ struct TTEntry {
     to: u8,
     path_kind: u8,
     stop_idx: u8,
-    special: u8,
-    promo: u8,
+    special: SpecialMove,
+    promo: PieceType,
 }
 
 // -----------------------------------------------------------------------
@@ -179,10 +146,11 @@ impl Flux {
         if self.stopped {
             return true;
         }
-        if self.budget_time_us > 0 && (self.nodes & 255) == 0 {
-            if self.elapsed_us() >= self.budget_time_us * 9 / 10 {
-                self.stopped = true;
-            }
+        if self.budget_time_us > 0
+            && (self.nodes & 255) == 0
+            && self.elapsed_us() >= self.budget_time_us * 9 / 10
+        {
+            self.stopped = true;
         }
         self.stopped
     }
@@ -193,21 +161,8 @@ impl Flux {
             to: e.to,
             path_kind: e.path_kind,
             stop_index: e.stop_idx,
-            special: match e.special {
-                1 => SpecialMove::Castle,
-                2 => SpecialMove::EnPassant,
-                3 => SpecialMove::Promotion,
-                _ => SpecialMove::None,
-            },
-            promo_piece: match e.promo {
-                1 => PieceType::Pawn,
-                2 => PieceType::Knight,
-                3 => PieceType::Bishop,
-                4 => PieceType::Rook,
-                5 => PieceType::Queen,
-                6 => PieceType::King,
-                _ => PieceType::None,
-            },
+            special: e.special,
+            promo_piece: e.promo,
         }
     }
 
@@ -224,8 +179,8 @@ impl Flux {
             e.to = m.to;
             e.path_kind = m.path_kind;
             e.stop_idx = m.stop_index;
-            e.special = m.special as u8;
-            e.promo = m.promo_piece as u8;
+            e.special = m.special;
+            e.promo = m.promo_piece;
         }
     }
 
@@ -272,18 +227,15 @@ impl Flux {
                 let mut passed = true;
                 let dir: i32 = if c == Color::White { 1 } else { -1 };
                 let mut fr = r + dir;
-                'outer: while fr >= 0 && fr < 8 {
+                'outer: while (0..8).contains(&fr) {
                     for df in -1..=1i32 {
                         let ff = f + df;
-                        if ff < 0 || ff > 7 {
+                        if !(0..=7).contains(&ff) {
                             continue;
                         }
                         let cs = (fr * 8 + ff) as u8;
                         let cp = pos.board[cs as usize];
-                        if !cp.is_empty()
-                            && cp.piece_type == PieceType::Pawn
-                            && cp.color != c
-                        {
+                        if !cp.is_empty() && cp.piece_type == PieceType::Pawn && cp.color != c {
                             passed = false;
                             break 'outer;
                         }
@@ -301,11 +253,9 @@ impl Flux {
             if pt == PieceType::Bishop {
                 bishop_count[ci] += 1;
             }
-            if pt == PieceType::Rook || pt == PieceType::Queen {
-                if slider_n[ci] < 16 {
-                    slider_sq[ci][slider_n[ci]] = sq;
-                    slider_n[ci] += 1;
-                }
+            if (pt == PieceType::Rook || pt == PieceType::Queen) && slider_n[ci] < 16 {
+                slider_sq[ci][slider_n[ci]] = sq;
+                slider_n[ci] += 1;
             }
         }
 
@@ -387,7 +337,7 @@ impl Flux {
                 let pf = psq & 7;
                 let file_dist = (pf - kf).abs();
                 let rank_ahead = (pr - kr) * shield_dir;
-                if file_dist <= 1 && rank_ahead >= 1 && rank_ahead <= 2 {
+                if file_dist <= 1 && (1..=2).contains(&rank_ahead) {
                     sc_pos += sign * 15;
                 }
             }
@@ -438,14 +388,13 @@ impl Flux {
 
         for i in 0..ml.moves.len() {
             let m = &ml.moves[i];
-            let s: f32;
-            if *m == *ttm {
-                s = 1e7;
+
+            let s: f32 = if *m == *ttm {
+                1e7
             } else {
                 let mut sc = 0.0f32;
                 if !pos.board[m.to as usize].is_empty() {
-                    sc += 100000.0
-                        + pval(pos.board[m.to as usize].piece_type) as f32 * 10.0
+                    sc += 100000.0 + pval(pos.board[m.to as usize].piece_type) as f32 * 10.0
                         - pval(pos.board[m.from as usize].piece_type) as f32;
                 }
                 if m.special == SpecialMove::Promotion {
@@ -473,17 +422,20 @@ impl Flux {
                 if *m == cm {
                     sc += 60000.0;
                 }
-                sc += self.history[pos.side_to_move as usize][m.from as usize][m.to as usize]
-                    as f32;
-                s = sc;
-            }
+                sc +=
+                    self.history[pos.side_to_move as usize][m.from as usize][m.to as usize] as f32;
+                sc
+            };
             scores[i] = s;
         }
 
         // Selection sort with NEON-accelerated max finding
         for i in 0..ml.moves.len() {
             let best_idx = find_max_index(&scores, i, ml.moves.len());
-            if best_idx != i { ml.moves.swap(i, best_idx); scores.swap(i, best_idx); }
+            if best_idx != i {
+                ml.moves.swap(i, best_idx);
+                scores.swap(i, best_idx);
+            }
         }
     }
 
@@ -545,20 +497,16 @@ impl Flux {
         let static_eval = self.evaluate(pos);
 
         // Deeper futility: depth <= 6, margin = depth * 150
-        if !in_check && !is_pv && depth <= 6 && ply > 0 {
-            if static_eval - depth * 150 >= beta {
-                self.null_cuts += 1;
-                return beta;
-            }
+        if !in_check && !is_pv && depth <= 6 && ply > 0 && static_eval - depth * 150 >= beta {
+            self.null_cuts += 1;
+            return beta;
         }
 
         // Razoring: depth <= 3, margin 400
-        if !in_check && !is_pv && depth <= 3 && ply > 0 {
-            if static_eval + 400 < alpha {
-                let qs = self.qsearch(pos, alpha, beta, 0);
-                if qs < alpha {
-                    return qs;
-                }
+        if !in_check && !is_pv && depth <= 3 && ply > 0 && static_eval + 400 < alpha {
+            let qs = self.qsearch(pos, alpha, beta, 0);
+            if qs < alpha {
+                return qs;
             }
         }
 
@@ -578,7 +526,7 @@ impl Flux {
             ml.push(self.move_buf[i]);
         }
 
-        if ml.moves.len() == 0 {
+        if ml.moves.is_empty() {
             return if in_check { -99000 + ply } else { 0 };
         }
         self.order_moves(pos, &mut ml, ply as usize, &ttm);
@@ -626,10 +574,19 @@ impl Flux {
                 }
                 r = r.clamp(1, depth - 1);
 
-                let s = -self.search(pos, depth - 1 - r, -(alpha + 1), -alpha, ply + 1, gives_check, false);
+                let s = -self.search(
+                    pos,
+                    depth - 1 - r,
+                    -(alpha + 1),
+                    -alpha,
+                    ply + 1,
+                    gives_check,
+                    false,
+                );
                 if s > alpha && !self.stopped {
                     self.lmr_re += 1;
-                    score = -self.search(pos, depth - 1, -beta, -alpha, ply + 1, gives_check, is_pv);
+                    score =
+                        -self.search(pos, depth - 1, -beta, -alpha, ply + 1, gives_check, is_pv);
                 } else {
                     score = s;
                 }
@@ -869,19 +826,24 @@ impl Flux {
             if m.special == SpecialMove::Promotion {
                 const P: [char; 7] = ['\0', '\0', 'n', 'b', 'r', 'q', '\0'];
                 let pi = m.promo_piece as usize;
-                if pi >= 2 && pi <= 5 {
+                if (2..=5).contains(&pi) {
                     uci.push(P[pi]);
                 }
             }
             ranked.push((uci, sc));
         }
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        ranked.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
         let cap = ranked.len().min(32);
         let mut out = format!(
             r#"{{"engine":"flux_022","qn":{},"tt":{},"bcut":{},"fcut":{},"nmp":{},"lmr":[{},{}],"top_moves":["#,
-            self.qnodes, self.tt_hits, self.beta_cuts, self.first_cuts,
-            self.null_cuts, self.lmr_tries, self.lmr_re,
+            self.qnodes,
+            self.tt_hits,
+            self.beta_cuts,
+            self.first_cuts,
+            self.null_cuts,
+            self.lmr_tries,
+            self.lmr_re,
         );
         for i in 0..cap {
             if i > 0 {
@@ -908,11 +870,7 @@ impl Engine for Flux {
         self.prev_move = Move::default();
     }
 
-    fn choose_move(
-        &mut self,
-        pos: &mut Position,
-        budget: &SearchBudget,
-    ) -> (Move, SearchStats) {
+    fn choose_move(&mut self, pos: &mut Position, budget: &SearchBudget) -> (Move, SearchStats) {
         self.t0 = Instant::now();
         self.budget_time_us = budget.max_time_us;
         self.nodes = 0;
@@ -936,7 +894,7 @@ impl Engine for Flux {
 
         let mut stats = SearchStats::default();
 
-        if root.moves.len() == 0 {
+        if root.moves.is_empty() {
             return (Move::default(), stats);
         }
         if root.moves.len() == 1 {

@@ -49,7 +49,7 @@ pub struct SearchBudget {
     pub seed: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SearchStats {
     pub nodes: u64,
     pub depth_reached: u32,
@@ -58,20 +58,6 @@ pub struct SearchStats {
     pub time_used_us: i64,
     pub pv: Vec<Move>,
     pub diag_json: String,
-}
-
-impl Default for SearchStats {
-    fn default() -> Self {
-        Self {
-            nodes: 0,
-            depth_reached: 0,
-            seldepth: 0,
-            eval_cp: 0,
-            time_used_us: 0,
-            pv: Vec::new(),
-            diag_json: String::new(),
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -104,11 +90,15 @@ pub fn make_square(r: i32, f: i32) -> Square {
 }
 
 pub fn valid_rf(r: i32, f: i32) -> bool {
-    r >= 0 && r < 8 && f >= 0 && f < 8
+    (0..8).contains(&r) && (0..8).contains(&f)
 }
 
 pub fn opponent(c: Color) -> Color {
-    if c == Color::White { Color::Black } else { Color::White }
+    if c == Color::White {
+        Color::Black
+    } else {
+        Color::White
+    }
 }
 
 pub const CASTLE_WK: u8 = 1;

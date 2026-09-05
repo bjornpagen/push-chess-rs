@@ -22,45 +22,12 @@
 use std::sync::LazyLock;
 use std::time::Instant;
 
-#[cfg(target_arch = "aarch64")]
-use std::arch::aarch64::*;
+use super::support::find_max_index;
 
-use crate::core::types::*;
-use crate::core::position::Position;
 use crate::core::movegen::generate_legal_moves;
+use crate::core::position::Position;
+use crate::core::types::*;
 use crate::engine::Engine;
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn neon_find_max_index(scores: &[f32], start: usize, len: usize) -> usize {
-    unsafe {
-        let ptr = scores.as_ptr().add(start);
-        let count = len - start;
-        let chunks = count / 4;
-        let mut vmax = vld1q_f32(ptr);
-        for i in 1..chunks { vmax = vmaxq_f32(vmax, vld1q_f32(ptr.add(i * 4))); }
-        let mut max_val = vmaxvq_f32(vmax);
-        for i in (chunks * 4)..count { let v = *ptr.add(i); if v > max_val { max_val = v; } }
-        let target = vdupq_n_f32(max_val);
-        for i in 0..chunks {
-            let cmp = vceqq_f32(vld1q_f32(ptr.add(i * 4)), target);
-            let mask: [u32; 4] = std::mem::transmute(cmp);
-            for lane in 0..4 { if mask[lane] != 0 { return start + i * 4 + lane; } }
-        }
-        for i in (chunks * 4)..count { if *ptr.add(i) == max_val { return start + i; } }
-        start
-    }
-}
-
-#[inline]
-fn find_max_index(scores: &[f32], start: usize, len: usize) -> usize {
-    if len <= start { return start; }
-    #[cfg(target_arch = "aarch64")]
-    { if len - start >= 4 { return unsafe { neon_find_max_index(scores, start, len) }; } }
-    let (mut best_idx, mut best_val) = (start, scores[start]);
-    for j in (start + 1)..len { if scores[j] > best_val { best_val = scores[j]; best_idx = j; } }
-    best_idx
-}
 
 // ---------------------------------------------------------------------------
 // TT (1M entries)
@@ -80,8 +47,8 @@ struct TTEntry {
     to: u8,
     path_kind: u8,
     stop_idx: u8,
-    special: u8,
-    promo: u8,
+    special: SpecialMove,
+    promo: PieceType,
 }
 
 fn tt_to_move(e: &TTEntry) -> Move {
@@ -90,21 +57,8 @@ fn tt_to_move(e: &TTEntry) -> Move {
         to: e.to,
         path_kind: e.path_kind,
         stop_index: e.stop_idx,
-        special: match e.special {
-            1 => SpecialMove::Castle,
-            2 => SpecialMove::EnPassant,
-            3 => SpecialMove::Promotion,
-            _ => SpecialMove::None,
-        },
-        promo_piece: match e.promo {
-            1 => PieceType::Pawn,
-            2 => PieceType::Knight,
-            3 => PieceType::Bishop,
-            4 => PieceType::Rook,
-            5 => PieceType::Queen,
-            6 => PieceType::King,
-            _ => PieceType::None,
-        },
+        special: e.special,
+        promo_piece: e.promo,
     }
 }
 
@@ -117,7 +71,9 @@ struct LmrTable {
 }
 
 static LMR: LazyLock<LmrTable> = LazyLock::new(|| {
-    let mut t = LmrTable { table: [[0i32; 256]; 32] };
+    let mut t = LmrTable {
+        table: [[0i32; 256]; 32],
+    };
     for d in 0..32 {
         for m in 0..256 {
             t.table[d][m] = if d < 2 || m < 3 {
@@ -225,10 +181,11 @@ impl PulseEngine {
         if self.stopped {
             return true;
         }
-        if self.budget_max_time_us > 0 && (self.nodes & 255) == 0 {
-            if self.elapsed_us() >= self.budget_max_time_us * 9 / 10 {
-                self.stopped = true;
-            }
+        if self.budget_max_time_us > 0
+            && (self.nodes & 255) == 0
+            && self.elapsed_us() >= self.budget_max_time_us * 9 / 10
+        {
+            self.stopped = true;
         }
         self.stopped
     }
@@ -246,8 +203,8 @@ impl PulseEngine {
             e.to = m.to;
             e.path_kind = m.path_kind;
             e.stop_idx = m.stop_index;
-            e.special = m.special as u8;
-            e.promo = m.promo_piece as u8;
+            e.special = m.special;
+            e.promo = m.promo_piece;
         }
     }
 
@@ -311,7 +268,10 @@ impl PulseEngine {
 
             // Chebyshev distance to center (center = 3.5,3.5 -> nearest squares 3,4)
             // Using integer approx: min dist to any of {3,4} x {3,4}
-            let cd = (r - 3).abs().min((r - 4).abs()).max((f - 3).abs().min((f - 4).abs()));
+            let cd = (r - 3)
+                .abs()
+                .min((r - 4).abs())
+                .max((f - 3).abs().min((f - 4).abs()));
 
             // === CHEAP MOBILITY PROXY ===
             // Centrality bonus for non-pawn pieces (approximates mobility)
@@ -354,10 +314,10 @@ impl PulseEngine {
                 let mut passed = true;
                 let dir: i32 = if c == Color::White { 1 } else { -1 };
                 let mut fr = r + dir;
-                'passed_check: while fr >= 0 && fr < 8 && passed {
+                'passed_check: while (0..8).contains(&fr) && passed {
                     for df in -1..=1 {
                         let ff = f + df;
-                        if ff < 0 || ff > 7 {
+                        if !(0..=7).contains(&ff) {
                             continue;
                         }
                         let cs = (fr * 8 + ff) as u8;
@@ -380,11 +340,9 @@ impl PulseEngine {
             if pt == PieceType::Bishop {
                 bishop_count[ci] += 1;
             }
-            if pt == PieceType::Rook || pt == PieceType::Queen {
-                if slider_n[ci] < 16 {
-                    slider_sq[ci][slider_n[ci]] = sq;
-                    slider_n[ci] += 1;
-                }
+            if (pt == PieceType::Rook || pt == PieceType::Queen) && slider_n[ci] < 16 {
+                slider_sq[ci][slider_n[ci]] = sq;
+                slider_n[ci] += 1;
             }
 
             // Track non-king pieces for push awareness
@@ -430,16 +388,18 @@ impl PulseEngine {
                 let nf = (nsq & 7) as i32;
                 // Rank 4-5 (0-indexed: ranks 3-4 for white, ranks 3-4 for black)
                 let adv_rank = if c == Color::White { nr } else { 7 - nr };
-                if adv_rank < 4 || adv_rank > 5 {
+                if !(4..=5).contains(&adv_rank) {
                     continue;
                 }
                 // Check defended by friendly pawn
                 let pawn_def_r = if c == Color::White { nr - 1 } else { nr + 1 };
                 let mut defended = false;
-                if pawn_def_r >= 0 && pawn_def_r <= 7 {
+                if (0..=7).contains(&pawn_def_r) {
                     for df in [-1i32, 1] {
                         let pf = nf + df;
-                        if pf < 0 || pf > 7 { continue; }
+                        if !(0..=7).contains(&pf) {
+                            continue;
+                        }
                         let ps = (pawn_def_r * 8 + pf) as usize;
                         let pp = pos.board[ps];
                         if pp.piece_type == PieceType::Pawn && pp.color == c {
@@ -448,16 +408,20 @@ impl PulseEngine {
                         }
                     }
                 }
-                if !defended { continue; }
+                if !defended {
+                    continue;
+                }
                 // Check can't be attacked by enemy pawns on adjacent files
                 let enemy_dir: i32 = if c == Color::White { 1 } else { -1 };
                 let mut can_be_attacked = false;
                 // Check ranks ahead of the knight for enemy pawns on adjacent files
                 let mut cr = nr + enemy_dir;
-                while cr >= 0 && cr <= 7 {
+                while (0..=7).contains(&cr) {
                     for df in [-1i32, 1] {
                         let cf = nf + df;
-                        if cf < 0 || cf > 7 { continue; }
+                        if !(0..=7).contains(&cf) {
+                            continue;
+                        }
                         let cs = (cr * 8 + cf) as usize;
                         let cp = pos.board[cs];
                         if cp.piece_type == PieceType::Pawn && cp.color != c {
@@ -467,24 +431,30 @@ impl PulseEngine {
                             can_be_attacked = true;
                         }
                     }
-                    if can_be_attacked { break; }
+                    if can_be_attacked {
+                        break;
+                    }
                     cr += enemy_dir;
                 }
                 // Also check enemy pawns behind (they'd need to be on adjacent files
                 // on ranks that can still advance to attack)
                 let behind_dir: i32 = -enemy_dir;
                 cr = nr + behind_dir;
-                while cr >= 0 && cr <= 7 && !can_be_attacked {
+                while (0..=7).contains(&cr) && !can_be_attacked {
                     for df in [-1i32, 1] {
                         let cf = nf + df;
-                        if cf < 0 || cf > 7 { continue; }
+                        if !(0..=7).contains(&cf) {
+                            continue;
+                        }
                         let cs = (cr * 8 + cf) as usize;
                         let cp = pos.board[cs];
                         if cp.piece_type == PieceType::Pawn && cp.color != c {
                             can_be_attacked = true;
                         }
                     }
-                    if can_be_attacked { break; }
+                    if can_be_attacked {
+                        break;
+                    }
                     cr += behind_dir;
                 }
                 if !can_be_attacked {
@@ -569,7 +539,7 @@ impl PulseEngine {
                 let pf = psq & 7;
                 let file_dist = (pf - kf).abs();
                 let rank_ahead = (pr - kr) * shield_dir;
-                if file_dist <= 1 && rank_ahead >= 1 && rank_ahead <= 2 {
+                if file_dist <= 1 && (1..=2).contains(&rank_ahead) {
                     sc_pos += sign * 15;
                 }
             }
@@ -613,7 +583,7 @@ impl PulseEngine {
                     }
                     let nr = kr + dr;
                     let nf = kf + df;
-                    if nr < 0 || nr > 7 || nf < 0 || nf > 7 {
+                    if !(0..=7).contains(&nr) || !(0..=7).contains(&nf) {
                         continue;
                     }
                     let ns = (nr * 8 + nf) as u8;
@@ -625,7 +595,7 @@ impl PulseEngine {
                         adj_friendly += 1;
                         let er = nr + dr;
                         let ef = nf + df;
-                        if er >= 0 && er <= 7 && ef >= 0 && ef <= 7 {
+                        if (0..=7).contains(&er) && (0..=7).contains(&ef) {
                             let es = (er * 8 + ef) as u8;
                             if pos.board[es as usize].is_empty() {
                                 push_escapes += 1;
@@ -651,7 +621,9 @@ impl PulseEngine {
                 let mut vulnerable = false;
 
                 for si in 0..slider_n[oci] {
-                    if vulnerable { break; }
+                    if vulnerable {
+                        break;
+                    }
                     let ssq = slider_sq[oci][si] as i32;
                     let sr = ssq >> 3;
                     let sf = ssq & 7;
@@ -660,8 +632,20 @@ impl PulseEngine {
                         continue;
                     }
 
-                    let dr: i32 = if sr == pr { 0 } else if pr > sr { 1 } else { -1 };
-                    let df: i32 = if sf == pf { 0 } else if pf > sf { 1 } else { -1 };
+                    let dr: i32 = if sr == pr {
+                        0
+                    } else if pr > sr {
+                        1
+                    } else {
+                        -1
+                    };
+                    let df: i32 = if sf == pf {
+                        0
+                    } else if pf > sf {
+                        1
+                    } else {
+                        -1
+                    };
 
                     let mut clear = true;
                     let mut cr = sr + dr;
@@ -681,7 +665,7 @@ impl PulseEngine {
 
                     let br = pr + dr;
                     let bf = pf + df;
-                    if br >= 0 && br <= 7 && bf >= 0 && bf <= 7 {
+                    if (0..=7).contains(&br) && (0..=7).contains(&bf) {
                         let bs = (br * 8 + bf) as usize;
                         let bp = pos.board[bs];
                         if !bp.is_empty() && bp.color == c {
@@ -709,9 +693,9 @@ impl PulseEngine {
 
         for i in 0..ml.moves.len() {
             let m = &ml.moves[i];
-            let s: f32;
-            if *m == *ttm {
-                s = 1e7;
+
+            let s: f32 = if *m == *ttm {
+                1e7
             } else {
                 let mut sv: f32 = 0.0;
                 if !pos.board[m.to as usize].is_empty() {
@@ -743,16 +727,21 @@ impl PulseEngine {
                 if *m == cm {
                     sv += 60000.0;
                 }
-                sv += self.history[history_idx(pos.side_to_move as usize, m.from as usize, m.to as usize)] as f32;
-                s = sv;
-            }
+                sv += self.history
+                    [history_idx(pos.side_to_move as usize, m.from as usize, m.to as usize)]
+                    as f32;
+                sv
+            };
             scores[i] = s;
         }
 
         // Selection sort with NEON-accelerated max finding
         for i in 0..ml.moves.len() {
             let best_idx = find_max_index(&scores, i, ml.moves.len());
-            if best_idx != i { ml.moves.swap(i, best_idx); scores.swap(i, best_idx); }
+            if best_idx != i {
+                ml.moves.swap(i, best_idx);
+                scores.swap(i, best_idx);
+            }
         }
     }
 
@@ -933,10 +922,19 @@ impl PulseEngine {
                 r = r.clamp(1, depth - 1);
 
                 // LMR: zero-window, not PV
-                let s0 = -self.search(pos, depth - 1 - r, -(alpha + 1), -alpha, ply + 1, gives_check, false);
+                let s0 = -self.search(
+                    pos,
+                    depth - 1 - r,
+                    -(alpha + 1),
+                    -alpha,
+                    ply + 1,
+                    gives_check,
+                    false,
+                );
                 if s0 > alpha && !self.stopped {
                     self.lmr_re += 1;
-                    score = -self.search(pos, depth - 1, -beta, -alpha, ply + 1, gives_check, is_pv);
+                    score =
+                        -self.search(pos, depth - 1, -beta, -alpha, ply + 1, gives_check, is_pv);
                 } else {
                     score = s0;
                 }
@@ -945,15 +943,39 @@ impl PulseEngine {
                 let ext = if gives_check && depth <= 4 { 1 } else { 0 };
                 if i > 0 && !self.stopped {
                     // Zero-window search for non-first moves
-                    let s1 = -self.search(pos, depth - 1 + ext, -(alpha + 1), -alpha, ply + 1, gives_check, false);
+                    let s1 = -self.search(
+                        pos,
+                        depth - 1 + ext,
+                        -(alpha + 1),
+                        -alpha,
+                        ply + 1,
+                        gives_check,
+                        false,
+                    );
                     if s1 > alpha && s1 < beta && !self.stopped {
-                        score = -self.search(pos, depth - 1 + ext, -beta, -alpha, ply + 1, gives_check, is_pv);
+                        score = -self.search(
+                            pos,
+                            depth - 1 + ext,
+                            -beta,
+                            -alpha,
+                            ply + 1,
+                            gives_check,
+                            is_pv,
+                        );
                     } else {
                         score = s1;
                     }
                 } else {
                     // First move at PV node: full window, is_pv=true
-                    score = -self.search(pos, depth - 1 + ext, -beta, -alpha, ply + 1, gives_check, is_pv);
+                    score = -self.search(
+                        pos,
+                        depth - 1 + ext,
+                        -beta,
+                        -alpha,
+                        ply + 1,
+                        gives_check,
+                        is_pv,
+                    );
                 }
             }
             pos.unmake_move();
@@ -980,7 +1002,11 @@ impl PulseEngine {
                     *h = (*h + (depth * depth) as i16).min(16000);
                     for j in 0..i {
                         if pos.board[ml.moves[j].to as usize].is_empty() {
-                            let hh = &mut self.history[history_idx(ci, ml.moves[j].from as usize, ml.moves[j].to as usize)];
+                            let hh = &mut self.history[history_idx(
+                                ci,
+                                ml.moves[j].from as usize,
+                                ml.moves[j].to as usize,
+                            )];
                             *hh = (*hh - depth as i16).max(-16000);
                         }
                     }
@@ -1113,7 +1139,7 @@ impl PulseEngine {
             let mut buf = std::mem::take(&mut self.move_buf);
             buf.clear();
             generate_legal_moves(pos, &mut buf);
-            let found = buf.iter().any(|lm| *lm == m);
+            let found = buf.contains(&m);
             self.move_buf = buf;
             if !found {
                 break;
@@ -1162,13 +1188,19 @@ impl PulseEngine {
             }
             ranked.push((uci, sc));
         }
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        ranked.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         let cap = ranked.len().min(32);
 
         let mut diag = format!(
             r#"{{"engine":"pulse_001","qn":{},"tt":{},"bcut":{},"fcut":{},"nmp":{},"lazy":{},"lmr":[{},{}],"top_moves":["#,
-            self.qnodes, self.tt_hits, self.beta_cuts, self.first_cuts,
-            self.null_cuts, self.lazy_cuts, self.lmr_tries, self.lmr_re,
+            self.qnodes,
+            self.tt_hits,
+            self.beta_cuts,
+            self.first_cuts,
+            self.null_cuts,
+            self.lazy_cuts,
+            self.lmr_tries,
+            self.lmr_re,
         );
         for i in 0..cap {
             if i > 0 {
@@ -1280,9 +1312,18 @@ impl Engine for PulseEngine {
                     let score;
                     if i > 0 && !self.stopped {
                         // Zero-window for non-first moves
-                        let s1 = -self.search(pos, depth - 1, -(alpha + 1), -alpha, 1, gives_check, false);
+                        let s1 = -self.search(
+                            pos,
+                            depth - 1,
+                            -(alpha + 1),
+                            -alpha,
+                            1,
+                            gives_check,
+                            false,
+                        );
                         if s1 > alpha && s1 < beta && !self.stopped {
-                            score = -self.search(pos, depth - 1, -beta, -alpha, 1, gives_check, true);
+                            score =
+                                -self.search(pos, depth - 1, -beta, -alpha, 1, gives_check, true);
                         } else {
                             score = s1;
                         }
@@ -1370,7 +1411,7 @@ impl Engine for PulseEngine {
         // Re-generate legal moves and verify the chosen best move is among them.
         let mut fresh = Vec::new();
         generate_legal_moves(pos, &mut fresh);
-        if !fresh.iter().any(|m| *m == best) {
+        if !fresh.contains(&best) {
             best = fresh.first().copied().unwrap_or_default();
         }
 

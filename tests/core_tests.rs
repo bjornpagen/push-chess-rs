@@ -1,7 +1,7 @@
-use push_chess::core::types::*;
-use push_chess::core::position::{Position, start_position};
-use push_chess::core::push::{resolve_push, resolve_knight_push, PushResult};
 use push_chess::core::movegen::generate_legal_moves;
+use push_chess::core::position::{Position, start_position};
+use push_chess::core::push::{resolve_knight_push, resolve_push};
+use push_chess::core::types::*;
 
 // ---- Push Chain Tests ----
 
@@ -15,10 +15,11 @@ fn test_push_rook_simple() {
     assert_eq!(pos.board[20].piece_type, PieceType::Pawn);
 
     let info = resolve_push(&pos, 4, 36, 1, 0); // e1->e5
-    assert_eq!(info.result, PushResult::OK);
-    assert_eq!(info.num_displacements, 2);
-    assert_eq!(info.displacements[0], (4u8, 36u8));  // rook->e5
-    assert_eq!(info.displacements[1], (20u8, 44u8)); // pawn->e6
+    let info = info.expect("legal push");
+    assert!(info.captured().is_none());
+    assert_eq!(info.displacements().len(), 2);
+    assert_eq!(info.displacements()[0], (4u8, 36u8)); // rook->e5
+    assert_eq!(info.displacements()[1], (20u8, 44u8)); // pawn->e6
 }
 
 #[test]
@@ -27,10 +28,11 @@ fn test_push_rook_to_friendly() {
     let mut pos = Position::default();
     pos.set_from_fen("8/8/8/8/8/4P3/8/4R3 w - - 0 1");
     let info = resolve_push(&pos, 4, 20, 1, 0); // e1->e3
-    assert_eq!(info.result, PushResult::OK);
-    assert_eq!(info.num_displacements, 2);
-    assert_eq!(info.displacements[0], (4u8, 20u8));  // rook->e3
-    assert_eq!(info.displacements[1], (20u8, 28u8)); // pawn->e4
+    let info = info.expect("legal push");
+    assert!(info.captured().is_none());
+    assert_eq!(info.displacements().len(), 2);
+    assert_eq!(info.displacements()[0], (4u8, 20u8)); // rook->e3
+    assert_eq!(info.displacements()[1], (20u8, 28u8)); // pawn->e4
 }
 
 #[test]
@@ -40,16 +42,17 @@ fn test_push_cascade() {
     // Result: rook@e3, e2-pawn->e4, e4-pawn->e5
     let mut pos = Position::default();
     pos.set_from_fen("8/8/8/8/4P3/8/4P3/4R3 w - - 0 1");
-    assert_eq!(pos.board[4].piece_type, PieceType::Rook);   // e1
-    assert_eq!(pos.board[12].piece_type, PieceType::Pawn);   // e2
-    assert_eq!(pos.board[28].piece_type, PieceType::Pawn);   // e4
+    assert_eq!(pos.board[4].piece_type, PieceType::Rook); // e1
+    assert_eq!(pos.board[12].piece_type, PieceType::Pawn); // e2
+    assert_eq!(pos.board[28].piece_type, PieceType::Pawn); // e4
 
     let info = resolve_push(&pos, 4, 20, 1, 0); // e1->e3
-    assert_eq!(info.result, PushResult::OK);
-    assert_eq!(info.num_displacements, 3);
-    assert_eq!(info.displacements[0], (4u8, 20u8));  // rook->e3
-    assert_eq!(info.displacements[1], (12u8, 28u8)); // e2->e4
-    assert_eq!(info.displacements[2], (28u8, 36u8)); // e4->e5
+    let info = info.expect("legal push");
+    assert!(info.captured().is_none());
+    assert_eq!(info.displacements().len(), 3);
+    assert_eq!(info.displacements()[0], (4u8, 20u8)); // rook->e3
+    assert_eq!(info.displacements()[1], (12u8, 28u8)); // e2->e4
+    assert_eq!(info.displacements()[2], (28u8, 36u8)); // e4->e5
 }
 
 #[test]
@@ -58,7 +61,7 @@ fn test_push_off_board() {
     let mut pos = Position::default();
     pos.set_from_fen("8/8/8/4P3/8/4P3/8/4R3 w - - 0 1");
     let info = resolve_push(&pos, 4, 52, 1, 0); // e1->e7
-    assert_eq!(info.result, PushResult::Illegal);
+    assert!(info.is_none());
 }
 
 #[test]
@@ -67,9 +70,10 @@ fn test_capture_simple() {
     let mut pos = Position::default();
     pos.set_from_fen("8/8/8/4p3/8/8/8/4R3 w - - 0 1");
     let info = resolve_push(&pos, 4, 36, 1, 0); // e1->e5
-    assert_eq!(info.result, PushResult::Capture);
-    assert_eq!(info.num_displacements, 1);
-    assert_eq!(info.captured_sq, 36);
+    let info = info.expect("legal capture");
+    assert!(info.captured().is_some());
+    assert_eq!(info.displacements().len(), 1);
+    assert_eq!(info.captured(), Some(36));
 }
 
 #[test]
@@ -78,7 +82,7 @@ fn test_capture_through_chain_illegal() {
     let mut pos = Position::default();
     pos.set_from_fen("8/8/8/4p3/8/4P3/8/4R3 w - - 0 1");
     let info = resolve_push(&pos, 4, 36, 1, 0); // e1->e5
-    assert_eq!(info.result, PushResult::Illegal);
+    assert!(info.is_none());
 }
 
 #[test]
@@ -88,7 +92,7 @@ fn test_push_into_enemy_illegal() {
     pos.set_from_fen("8/8/8/8/4p3/8/4P3/4R3 w - - 0 1");
     let info = resolve_push(&pos, 4, 20, 1, 0); // e1->e3
     // chain=[e2]. cascade needs 1 slot: e4 has enemy -> illegal
-    assert_eq!(info.result, PushResult::Illegal);
+    assert!(info.is_none());
 }
 
 #[test]
@@ -97,9 +101,10 @@ fn test_empty_move() {
     let mut pos = Position::default();
     pos.set_from_fen("8/8/8/8/8/8/8/4R3 w - - 0 1");
     let info = resolve_push(&pos, 4, 36, 1, 0);
-    assert_eq!(info.result, PushResult::OK);
-    assert_eq!(info.num_displacements, 1);
-    assert_eq!(info.displacements[0], (4u8, 36u8));
+    let info = info.expect("legal push");
+    assert!(info.captured().is_none());
+    assert_eq!(info.displacements().len(), 1);
+    assert_eq!(info.displacements()[0], (4u8, 36u8));
 }
 
 // ---- Position Tests ----
@@ -225,7 +230,10 @@ fn test_castling() {
     let mut moves = Vec::new();
     generate_legal_moves(&mut pos, &mut moves);
 
-    let castle_count = moves.iter().filter(|m| m.special == SpecialMove::Castle).count();
+    let castle_count = moves
+        .iter()
+        .filter(|m| m.special == SpecialMove::Castle)
+        .count();
     assert_eq!(castle_count, 2); // kingside and queenside
 }
 
@@ -237,7 +245,10 @@ fn test_en_passant() {
     let mut moves = Vec::new();
     generate_legal_moves(&mut pos, &mut moves);
 
-    let ep_count = moves.iter().filter(|m| m.special == SpecialMove::EnPassant).count();
+    let ep_count = moves
+        .iter()
+        .filter(|m| m.special == SpecialMove::EnPassant)
+        .count();
     assert_eq!(ep_count, 1);
 }
 
@@ -249,7 +260,10 @@ fn test_promotion() {
     let mut moves = Vec::new();
     generate_legal_moves(&mut pos, &mut moves);
 
-    let promo_count = moves.iter().filter(|m| m.special == SpecialMove::Promotion).count();
+    let promo_count = moves
+        .iter()
+        .filter(|m| m.special == SpecialMove::Promotion)
+        .count();
     assert_eq!(promo_count, 4); // Q, R, B, N
 }
 
@@ -277,11 +291,14 @@ fn test_knight_basic() {
     let mut pos = Position::default();
     pos.set_from_fen("8/8/8/8/4N3/8/8/4K2k w - - 0 1");
     let from: Square = 28; // e4
-    let to: Square = 45;   // f6
+    let to: Square = 45; // f6
 
     let info1 = resolve_knight_push(&pos, from, to, true);
     let info2 = resolve_knight_push(&pos, from, to, false);
-    assert!(info1.result == PushResult::OK || info2.result == PushResult::OK);
+    assert!(
+        info1.is_some_and(|p| p.captured().is_none())
+            || info2.is_some_and(|p| p.captured().is_none())
+    );
 }
 
 #[test]
@@ -292,12 +309,12 @@ fn test_knight_push_on_path() {
     let mut pos = Position::default();
     pos.set_from_fen("8/8/8/4P3/4N3/8/8/4K2k w - - 0 1");
     let from: Square = 28; // e4
-    let to: Square = 45;   // f6
+    let to: Square = 45; // f6
 
     let info1 = resolve_knight_push(&pos, from, to, true);
     let info2 = resolve_knight_push(&pos, from, to, false);
     // At least one should work
-    assert!(info1.result != PushResult::Illegal || info2.result != PushResult::Illegal);
+    assert!(info1.is_some() || info2.is_some());
 }
 
 // ---- Core API Test (adapted — use Position directly) ----

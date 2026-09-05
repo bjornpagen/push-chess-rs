@@ -1,8 +1,8 @@
+use super::push::{resolve_knight_push, resolve_push};
 /// Position representation for Push Chess, ported from C++ `core/position.h` + `core/position.cc`.
-
 use super::types::*;
 use super::zobrist::zobrist_tables;
-use super::push::{resolve_push, resolve_knight_push, PushResult, PushInfo};
+use arrayvec::ArrayVec;
 
 // ---------------------------------------------------------------------------
 // UndoInfo
@@ -11,8 +11,7 @@ use super::push::{resolve_push, resolve_knight_push, PushResult, PushInfo};
 #[derive(Clone)]
 pub struct UndoInfo {
     pub mv: Move,
-    pub changed: [(Square, Piece); 32],
-    pub num_changed: usize,
+    changed: ArrayVec<(Square, Piece), 32>,
     pub castling_rights: u8,
     pub ep_square: Square,
     pub halfmove_clock: u16,
@@ -24,8 +23,7 @@ impl Default for UndoInfo {
     fn default() -> Self {
         Self {
             mv: Move::default(),
-            changed: [(0, Piece::default()); 32],
-            num_changed: 0,
+            changed: ArrayVec::new(),
             castling_rights: 0,
             ep_square: 64,
             halfmove_clock: 0,
@@ -37,8 +35,9 @@ impl Default for UndoInfo {
 
 impl UndoInfo {
     pub fn add_changed(&mut self, sq: Square, old_piece: Piece) {
-        self.changed[self.num_changed] = (sq, old_piece);
-        self.num_changed += 1;
+        if !self.changed.iter().any(|&(changed_sq, _)| changed_sq == sq) {
+            self.changed.push((sq, old_piece));
+        }
     }
 }
 
@@ -145,7 +144,7 @@ impl Position {
             if c == '/' {
                 rank -= 1;
                 file = 0;
-            } else if c >= '1' && c <= '8' {
+            } else if ('1'..='8').contains(&c) {
                 file += (c as i32) - ('0' as i32);
             } else {
                 let color = if c.is_ascii_uppercase() {
@@ -304,13 +303,15 @@ impl Position {
         let z = zobrist_tables();
 
         // Save undo info
-        let mut undo = UndoInfo::default();
-        undo.mv = *m;
-        undo.castling_rights = self.castling_rights;
-        undo.ep_square = self.ep_square;
-        undo.halfmove_clock = self.halfmove_clock;
-        undo.zobrist = self.zobrist;
-        undo.king_sq = self.king_sq;
+        let mut undo = UndoInfo {
+            mv: *m,
+            castling_rights: self.castling_rights,
+            ep_square: self.ep_square,
+            halfmove_clock: self.halfmove_clock,
+            zobrist: self.zobrist,
+            king_sq: self.king_sq,
+            ..UndoInfo::default()
+        };
 
         let mover = self.board[m.from as usize];
         let us = self.side_to_move;
@@ -324,7 +325,11 @@ impl Position {
 
         if m.special == SpecialMove::Castle {
             // Standard castling: king moves 2 squares, rook hops
-            let rank = if us as u8 == Color::White as u8 { 0i32 } else { 7i32 };
+            let rank = if us as u8 == Color::White as u8 {
+                0i32
+            } else {
+                7i32
+            };
             let king_from = m.from;
             let king_to = m.to;
 
@@ -360,7 +365,6 @@ impl Position {
 
             self.king_sq[us as usize] = king_to;
             self.halfmove_clock += 1;
-
         } else if m.special == SpecialMove::EnPassant {
             // EP capture: pawn moves diagonally, captured pawn removed
             let cap_sq = make_square(rank_of(m.from), file_of(m.to));
@@ -381,44 +385,43 @@ impl Position {
             self.board[m.from as usize] = Piece::default();
             self.board[cap_sq as usize] = Piece::default();
             self.halfmove_clock = 0;
-
         } else {
             // Normal move or promotion: resolve push chain
             let is_pawn = mover.piece_type == PieceType::Pawn;
             let is_knight = mover.piece_type == PieceType::Knight;
 
-            let push_info: PushInfo = if is_knight {
+            let push_info = if is_knight {
                 let long_first = m.path_kind == 1;
                 resolve_knight_push(self, m.from, m.to, long_first)
             } else {
                 let rd = rank_of(m.to) - rank_of(m.from);
                 let fd = file_of(m.to) - file_of(m.from);
-                let dr = if rd != 0 { if rd > 0 { 1 } else { -1 } } else { 0 };
-                let dc = if fd != 0 { if fd > 0 { 1 } else { -1 } } else { 0 };
+                let dr = if rd != 0 {
+                    if rd > 0 { 1 } else { -1 }
+                } else {
+                    0
+                };
+                let dc = if fd != 0 {
+                    if fd > 0 { 1 } else { -1 }
+                } else {
+                    0
+                };
                 resolve_push(self, m.from, m.to, dr, dc)
-            };
+            }
+            .expect("make_move requires a generated move with a valid push path");
 
             // Record all squares that will change
-            for di in 0..push_info.num_displacements {
-                let (f_sq, t_sq) = push_info.displacements[di];
-                let already_f = (0..undo.num_changed).any(|j| undo.changed[j].0 == f_sq);
-                if !already_f {
-                    undo.add_changed(f_sq, self.board[f_sq as usize]);
-                }
-                let already_t = (0..undo.num_changed).any(|j| undo.changed[j].0 == t_sq);
-                if !already_t {
-                    undo.add_changed(t_sq, self.board[t_sq as usize]);
-                }
+            for di in 0..push_info.displacements().len() {
+                let (f_sq, t_sq) = push_info.displacements()[di];
+                undo.add_changed(f_sq, self.board[f_sq as usize]);
+                undo.add_changed(t_sq, self.board[t_sq as usize]);
             }
-            if push_info.captured_sq < 64 {
-                let already = (0..undo.num_changed).any(|j| undo.changed[j].0 == push_info.captured_sq);
-                if !already {
-                    undo.add_changed(push_info.captured_sq, self.board[push_info.captured_sq as usize]);
-                }
+            if let Some(sq) = push_info.captured() {
+                undo.add_changed(sq, self.board[sq as usize]);
             }
 
             // XOR out all pieces at affected squares
-            for ci in 0..undo.num_changed {
+            for ci in 0..undo.changed.len() {
                 let sq = undo.changed[ci].0;
                 if !self.board[sq as usize].is_empty() {
                     let c = self.board[sq as usize].color as usize;
@@ -427,41 +430,28 @@ impl Position {
                 }
             }
 
-            // Collect placements, clear sources, then place at destinations
-            let mut placements: [(Square, Piece); 16] = [(0, Piece::default()); 16];
-            let mut num_placements: usize = 0;
-            for di in 0..push_info.num_displacements {
-                let (f_sq, _t_sq) = push_info.displacements[di];
-                placements[num_placements] = (_t_sq, self.board[f_sq as usize]);
-                num_placements += 1;
-            }
-
-            // Clear all affected squares
-            for ci in 0..undo.num_changed {
-                self.board[undo.changed[ci].0 as usize] = Piece::default();
-            }
-
-            // Place pieces at destinations
-            for pi in 0..num_placements {
-                self.board[placements[pi].0 as usize] = placements[pi].1;
-            }
+            push_info.apply(&mut self.board);
 
             // Handle promotion (either mover or pushed pawn)
             if m.promo_piece != PieceType::None {
-                let promo_rank = if us as u8 == Color::White as u8 { 7i32 } else { 0i32 };
-                for pi in 0..num_placements {
-                    if placements[pi].1.piece_type == PieceType::Pawn
-                        && placements[pi].1.color as u8 == us as u8
-                        && rank_of(placements[pi].0) == promo_rank
+                let promo_rank = if us as u8 == Color::White as u8 {
+                    7i32
+                } else {
+                    0i32
+                };
+                for &(_, to) in push_info.displacements() {
+                    if self.board[to as usize].piece_type == PieceType::Pawn
+                        && self.board[to as usize].color == us
+                        && rank_of(to) == promo_rank
                     {
-                        self.board[placements[pi].0 as usize].piece_type = m.promo_piece;
+                        self.board[to as usize].piece_type = m.promo_piece;
                         break;
                     }
                 }
             }
 
             // XOR in all pieces at affected squares
-            for ci in 0..undo.num_changed {
+            for ci in 0..undo.changed.len() {
                 let sq = undo.changed[ci].0;
                 if !self.board[sq as usize].is_empty() {
                     let c = self.board[sq as usize].color as usize;
@@ -472,8 +462,8 @@ impl Position {
 
             // Update king position — check ALL displacements, not just the mover,
             // because push chains can displace kings of either side.
-            for di in 0..push_info.num_displacements {
-                let (_f_sq, t_sq) = push_info.displacements[di];
+            for di in 0..push_info.displacements().len() {
+                let (_f_sq, t_sq) = push_info.displacements()[di];
                 let placed = self.board[t_sq as usize];
                 if placed.piece_type == PieceType::King {
                     self.king_sq[placed.color as usize] = t_sq;
@@ -481,7 +471,7 @@ impl Position {
             }
 
             // Update halfmove clock
-            if is_pawn || push_info.result == PushResult::Capture {
+            if is_pawn || push_info.captured().is_some() {
                 self.halfmove_clock = 0;
             } else {
                 self.halfmove_clock += 1;
@@ -492,10 +482,7 @@ impl Position {
                 && ((rank_of(m.to) - rank_of(m.from)) == 2
                     || (rank_of(m.from) - rank_of(m.to)) == 2)
             {
-                new_ep = make_square(
-                    (rank_of(m.from) + rank_of(m.to)) / 2,
-                    file_of(m.from),
-                );
+                new_ep = make_square((rank_of(m.from) + rank_of(m.to)) / 2, file_of(m.from));
             }
         }
 
@@ -544,7 +531,10 @@ impl Position {
     // -------------------------------------------------------------------
 
     pub fn unmake_move(&mut self) {
-        let undo = self.undo_stack.pop().expect("unmake_move on empty undo_stack");
+        let undo = self
+            .undo_stack
+            .pop()
+            .expect("unmake_move on empty undo_stack");
 
         // Restore side
         self.side_to_move = opponent(self.side_to_move);
@@ -553,7 +543,7 @@ impl Position {
         }
 
         // Restore board squares
-        for i in 0..undo.num_changed {
+        for i in 0..undo.changed.len() {
             self.board[undo.changed[i].0 as usize] = undo.changed[i].1;
         }
 
@@ -574,7 +564,11 @@ impl Position {
         // Pawn attacks
         {
             // Pawns of 'attacker' attack from the other side
-            let dr: i32 = if attacker as u8 == Color::White as u8 { -1 } else { 1 };
+            let dr: i32 = if attacker as u8 == Color::White as u8 {
+                -1
+            } else {
+                1
+            };
             let r = rank_of(sq) + dr;
             for &dc in &[-1i32, 1i32] {
                 let f = file_of(sq) + dc;
@@ -607,11 +601,11 @@ impl Position {
                 }
                 // Try both decompositions
                 let info1 = resolve_knight_push(self, ksq, sq, true);
-                if info1.result == PushResult::Capture {
+                if info1.is_some_and(|p| p.captured().is_some()) {
                     return true;
                 }
                 let info2 = resolve_knight_push(self, ksq, sq, false);
-                if info2.result == PushResult::Capture {
+                if info2.is_some_and(|p| p.captured().is_some()) {
                     return true;
                 }
             }

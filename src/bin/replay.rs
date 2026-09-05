@@ -1,10 +1,10 @@
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph},
-    Frame,
 };
 use rusqlite::Connection;
 
@@ -197,7 +197,7 @@ fn parse_board(fen: &str) -> [[char; 8]; 8] {
             file = 0;
         } else if c.is_ascii_digit() {
             file += (c as usize) - ('0' as usize);
-        } else if rank >= 0 && rank < 8 && file < 8 {
+        } else if (0..8).contains(&rank) && file < 8 {
             board[rank as usize][file] = c;
             file += 1;
         }
@@ -412,11 +412,11 @@ impl App {
                         }
                     }
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if self.replay_pos < self.moves.len() as i32 - 1 {
-                        self.replay_pos += 1;
-                        self.move_list_state.select(Some(self.replay_pos as usize));
-                    }
+                KeyCode::Down | KeyCode::Char('j')
+                    if self.replay_pos < self.moves.len() as i32 - 1 =>
+                {
+                    self.replay_pos += 1;
+                    self.move_list_state.select(Some(self.replay_pos as usize));
                 }
                 _ => {}
             },
@@ -441,10 +441,11 @@ impl App {
         ])
         .split(area);
 
-        let title = Paragraph::new(Line::from(vec![
-            " Push Chess Replay ".bold().cyan(),
-        ]))
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
+        let title = Paragraph::new(Line::from(vec![" Push Chess Replay ".bold().cyan()])).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
         frame.render_widget(title, chunks[0]);
 
         let mut items: Vec<ListItem> = Vec::new();
@@ -467,7 +468,11 @@ impl App {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::DarkGray)),
             )
-            .highlight_style(Style::default().bg(Color::Rgb(40, 60, 80)).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(40, 60, 80))
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("▸ ");
         frame.render_stateful_widget(list, chunks[1], &mut self.tournament_state);
 
@@ -494,7 +499,11 @@ impl App {
         let title = Paragraph::new(Line::from(vec![
             format!(" {} ", self.tournament_label).cyan().bold(),
         ]))
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
         frame.render_widget(title, chunks[0]);
 
         let items: Vec<ListItem> = self
@@ -512,12 +521,21 @@ impl App {
                     Style::default().fg(Color::DarkGray)
                 };
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!(" #{:<4}", g.game_id), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!(" #{:<4}", g.game_id),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                     Span::raw(format!(" {:<10} vs {:<10}  ", g.white_id, g.black_id)),
                     Span::styled(format!("{:<7}", g.result), result_style),
                     Span::styled(format!("  {:<16}", g.termination), term_style),
-                    Span::styled(format!("  {:>3}p", g.ply_count), Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("  {:>5}ms", g.wall_time_ms), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("  {:>3}p", g.ply_count),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("  {:>5}ms", g.wall_time_ms),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]))
             })
             .collect();
@@ -529,7 +547,11 @@ impl App {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::DarkGray)),
             )
-            .highlight_style(Style::default().bg(Color::Rgb(40, 60, 80)).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(40, 60, 80))
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("▸ ");
         frame.render_stateful_widget(list, chunks[1], &mut self.game_state);
 
@@ -564,16 +586,41 @@ impl App {
             _ => Color::Yellow,
         };
         let header = Paragraph::new(Line::from(vec![
-            Span::styled(format!(" Game #{}", gi.game_id), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" Game #{}", gi.game_id),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
-            Span::styled(&gi.white_id, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &gi.white_id,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" vs ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&gi.black_id, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &gi.black_id,
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
-            Span::styled(&gi.result, Style::default().fg(result_color).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {}  {} ply", gi.termination, gi.ply_count), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                &gi.result,
+                Style::default()
+                    .fg(result_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {}  {} ply", gi.termination, gi.ply_count),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]))
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
         frame.render_widget(header, outer[0]);
 
         // Main area: board (left) | info panel (right)
@@ -608,27 +655,53 @@ impl App {
         let info_lines = if self.replay_pos < 0 {
             vec![
                 Line::from(""),
-                Line::from(Span::styled("  Start position", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))),
+                Line::from(Span::styled(
+                    "  Start position",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )),
             ]
         } else {
             let m = &self.moves[self.replay_pos as usize];
             let movenum = m.ply / 2 + 1;
             let dot = if m.side == "white" { "." } else { "..." };
-            let eval = if m.side == "black" { -m.eval_cp } else { m.eval_cp };
+            let eval = if m.side == "black" {
+                -m.eval_cp
+            } else {
+                m.eval_cp
+            };
 
             let mut move_spans = vec![
-                Span::styled(format!("  {}{} ", movenum, dot), Style::default().fg(Color::DarkGray)),
-                Span::styled(&m.moving_piece, Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("  {}{} ", movenum, dot),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    &m.moving_piece,
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(format!(" {}", m.move_uci)),
             ];
             if m.is_capture {
-                move_spans.push(Span::styled(format!(" x{}", m.captured), Style::default().fg(Color::Red)));
+                move_spans.push(Span::styled(
+                    format!(" x{}", m.captured),
+                    Style::default().fg(Color::Red),
+                ));
             }
             if m.is_promotion {
-                move_spans.push(Span::styled(" PROMO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+                move_spans.push(Span::styled(
+                    " PROMO",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
             }
             if m.in_check_after {
-                move_spans.push(Span::styled(" +CHECK", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+                move_spans.push(Span::styled(
+                    " +CHECK",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ));
             }
 
             let eval_str = if eval.abs() >= 90000 {
@@ -650,13 +723,28 @@ impl App {
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("  eval ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(eval_str.clone(), Style::default().fg(eval_color).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("   depth {}", m.depth), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        eval_str.clone(),
+                        Style::default().fg(eval_color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("   depth {}", m.depth),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]),
                 Line::from(vec![
-                    Span::styled(format!("  nodes {}k", m.nodes / 1000), Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("   time {}ms", m.time_us / 1000), Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("   legal {}", m.legal_count), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("  nodes {}k", m.nodes / 1000),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("   time {}ms", m.time_us / 1000),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("   legal {}", m.legal_count),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]),
             ]
         };
@@ -676,7 +764,11 @@ impl App {
             .map(|m| {
                 let movenum = m.ply / 2 + 1;
                 let dot = if m.side == "white" { "." } else { "..." };
-                let eval = if m.side == "black" { -m.eval_cp } else { m.eval_cp };
+                let eval = if m.side == "black" {
+                    -m.eval_cp
+                } else {
+                    m.eval_cp
+                };
                 let eval_str = if eval.abs() >= 90000 {
                     format!("M{}", 99000 - eval.abs())
                 } else {
@@ -695,17 +787,35 @@ impl App {
                     Color::Yellow
                 };
                 let mut spans = vec![
-                    Span::styled(format!("{:>3}{:<3} ", movenum, dot), Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("{:<6}", m.moving_piece), Style::default().fg(side_color)),
+                    Span::styled(
+                        format!("{:>3}{:<3} ", movenum, dot),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("{:<6}", m.moving_piece),
+                        Style::default().fg(side_color),
+                    ),
                     Span::raw(format!("{:<6}", m.move_uci)),
                 ];
                 if m.is_capture {
-                    spans.push(Span::styled(format!("x{:<5} ", m.captured), Style::default().fg(Color::Red)));
+                    spans.push(Span::styled(
+                        format!("x{:<5} ", m.captured),
+                        Style::default().fg(Color::Red),
+                    ));
                 } else {
-                    spans.push(Span::styled("       ", Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled(
+                        "       ",
+                        Style::default().fg(Color::DarkGray),
+                    ));
                 }
-                spans.push(Span::styled(format!("{:>6}", eval_str), Style::default().fg(eval_color)));
-                spans.push(Span::styled(format!("  d{}", m.depth), Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    format!("{:>6}", eval_str),
+                    Style::default().fg(eval_color),
+                ));
+                spans.push(Span::styled(
+                    format!("  d{}", m.depth),
+                    Style::default().fg(Color::DarkGray),
+                ));
                 ListItem::new(Line::from(spans))
             })
             .collect();
@@ -717,7 +827,11 @@ impl App {
                     .border_style(Style::default().fg(Color::DarkGray))
                     .title(format!(" Moves ({}) ", self.moves.len())),
             )
-            .highlight_style(Style::default().bg(Color::Rgb(40, 60, 80)).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(40, 60, 80))
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("▸ ");
         frame.render_stateful_widget(move_list, right[1], &mut self.move_list_state);
 
@@ -734,11 +848,7 @@ impl App {
         let ratio = if total > 0.0 { progress / total } else { 0.0 };
         let gauge = Gauge::default()
             .ratio(ratio)
-            .label(format!(
-                "{}/{}",
-                self.replay_pos + 1,
-                self.moves.len()
-            ))
+            .label(format!("{}/{}", self.replay_pos + 1, self.moves.len()))
             .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Rgb(30, 30, 30)));
         frame.render_widget(gauge, bottom[0]);
 
@@ -763,7 +873,9 @@ impl App {
 // ============================================================================
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = std::env::args().nth(1).unwrap_or_else(|| "pushchess.db".into());
+    let db_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "pushchess.db".into());
 
     let conn = Connection::open(&db_path)?;
 
@@ -772,12 +884,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = loop {
         terminal.draw(|frame| app.draw(frame))?;
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                if app.handle_key(key.code) {
-                    break Ok(());
-                }
-            }
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+            && app.handle_key(key.code)
+        {
+            break Ok(());
         }
     };
 

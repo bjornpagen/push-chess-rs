@@ -22,45 +22,12 @@
 use std::sync::LazyLock;
 use std::time::Instant;
 
-#[cfg(target_arch = "aarch64")]
-use std::arch::aarch64::*;
+use super::support::find_max_index;
 
-use crate::core::types::*;
-use crate::core::position::Position;
 use crate::core::movegen::generate_legal_moves;
+use crate::core::position::Position;
+use crate::core::types::*;
 use crate::engine::Engine;
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn neon_find_max_index(scores: &[f32], start: usize, len: usize) -> usize {
-    unsafe {
-        let ptr = scores.as_ptr().add(start);
-        let count = len - start;
-        let chunks = count / 4;
-        let mut vmax = vld1q_f32(ptr);
-        for i in 1..chunks { vmax = vmaxq_f32(vmax, vld1q_f32(ptr.add(i * 4))); }
-        let mut max_val = vmaxvq_f32(vmax);
-        for i in (chunks * 4)..count { let v = *ptr.add(i); if v > max_val { max_val = v; } }
-        let target = vdupq_n_f32(max_val);
-        for i in 0..chunks {
-            let cmp = vceqq_f32(vld1q_f32(ptr.add(i * 4)), target);
-            let mask: [u32; 4] = std::mem::transmute(cmp);
-            for lane in 0..4 { if mask[lane] != 0 { return start + i * 4 + lane; } }
-        }
-        for i in (chunks * 4)..count { if *ptr.add(i) == max_val { return start + i; } }
-        start
-    }
-}
-
-#[inline]
-fn find_max_index(scores: &[f32], start: usize, len: usize) -> usize {
-    if len <= start { return start; }
-    #[cfg(target_arch = "aarch64")]
-    { if len - start >= 4 { return unsafe { neon_find_max_index(scores, start, len) }; } }
-    let (mut best_idx, mut best_val) = (start, scores[start]);
-    for j in (start + 1)..len { if scores[j] > best_val { best_val = scores[j]; best_idx = j; } }
-    best_idx
-}
 
 // ---------------------------------------------------------------------------
 // TT
@@ -80,8 +47,8 @@ struct TTEntry {
     to: u8,
     path_kind: u8,
     stop_idx: u8,
-    special: u8,
-    promo: u8,
+    special: SpecialMove,
+    promo: PieceType,
 }
 
 fn tt_to_move(e: &TTEntry) -> Move {
@@ -90,21 +57,8 @@ fn tt_to_move(e: &TTEntry) -> Move {
         to: e.to,
         path_kind: e.path_kind,
         stop_index: e.stop_idx,
-        special: match e.special {
-            1 => SpecialMove::Castle,
-            2 => SpecialMove::EnPassant,
-            3 => SpecialMove::Promotion,
-            _ => SpecialMove::None,
-        },
-        promo_piece: match e.promo {
-            1 => PieceType::Pawn,
-            2 => PieceType::Knight,
-            3 => PieceType::Bishop,
-            4 => PieceType::Rook,
-            5 => PieceType::Queen,
-            6 => PieceType::King,
-            _ => PieceType::None,
-        },
+        special: e.special,
+        promo_piece: e.promo,
     }
 }
 
@@ -117,7 +71,9 @@ struct LmrTable {
 }
 
 static LMR: LazyLock<LmrTable> = LazyLock::new(|| {
-    let mut t = LmrTable { table: [[0i32; 256]; 32] };
+    let mut t = LmrTable {
+        table: [[0i32; 256]; 32],
+    };
     for d in 0..32 {
         for m in 0..256 {
             t.table[d][m] = if d < 2 || m < 3 {
@@ -156,8 +112,14 @@ impl MoveList {
 const BISHOP_DIRS: [(i32, i32); 4] = [(-1, -1), (-1, 1), (1, -1), (1, 1)];
 const ROOK_DIRS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 const KNIGHT_OFFSETS: [(i32, i32); 8] = [
-    (-2, -1), (-2, 1), (-1, -2), (-1, 2),
-    (1, -2), (1, 2), (2, -1), (2, 1),
+    (-2, -1),
+    (-2, 1),
+    (-1, -2),
+    (-1, 2),
+    (1, -2),
+    (1, 2),
+    (2, -1),
+    (2, 1),
 ];
 
 // ---------------------------------------------------------------------------
@@ -222,10 +184,11 @@ impl WardenEngine {
         if self.stopped {
             return true;
         }
-        if self.budget_max_time_us > 0 && (self.nodes & 255) == 0 {
-            if self.elapsed_us() >= self.budget_max_time_us * 9 / 10 {
-                self.stopped = true;
-            }
+        if self.budget_max_time_us > 0
+            && (self.nodes & 255) == 0
+            && self.elapsed_us() >= self.budget_max_time_us * 9 / 10
+        {
+            self.stopped = true;
         }
         self.stopped
     }
@@ -243,8 +206,8 @@ impl WardenEngine {
             e.to = m.to;
             e.path_kind = m.path_kind;
             e.stop_idx = m.stop_index;
-            e.special = m.special as u8;
-            e.promo = m.promo_piece as u8;
+            e.special = m.special;
+            e.promo = m.promo_piece;
         }
     }
 
@@ -270,7 +233,7 @@ impl WardenEngine {
                     for &(dr, df) in &KNIGHT_OFFSETS {
                         let nr = r + dr;
                         let nf = f + df;
-                        if nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+                        if (0..8).contains(&nr) && (0..8).contains(&nf) {
                             let ns = (nr * 8 + nf) as usize;
                             let target = pos.board[ns];
                             if target.is_empty() || target.color != color {
@@ -283,7 +246,7 @@ impl WardenEngine {
                     for &(dr, df) in &BISHOP_DIRS {
                         let mut nr = r + dr;
                         let mut nf = f + df;
-                        while nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+                        while (0..8).contains(&nr) && (0..8).contains(&nf) {
                             let ns = (nr * 8 + nf) as usize;
                             let target = pos.board[ns];
                             if target.is_empty() {
@@ -303,7 +266,7 @@ impl WardenEngine {
                     for &(dr, df) in &ROOK_DIRS {
                         let mut nr = r + dr;
                         let mut nf = f + df;
-                        while nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+                        while (0..8).contains(&nr) && (0..8).contains(&nf) {
                             let ns = (nr * 8 + nf) as usize;
                             let target = pos.board[ns];
                             if target.is_empty() {
@@ -324,7 +287,7 @@ impl WardenEngine {
                         for &(dr, df) in *dirs {
                             let mut nr = r + dr;
                             let mut nf = f + df;
-                            while nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+                            while (0..8).contains(&nr) && (0..8).contains(&nf) {
                                 let ns = (nr * 8 + nf) as usize;
                                 let target = pos.board[ns];
                                 if target.is_empty() {
@@ -368,13 +331,20 @@ impl WardenEngine {
     }
 
     /// Check if the square at (r,f) = sq is attacked by any friendly piece of `color`.
-    fn is_attacked_by_friendly(&self, pos: &Position, sq: u8, r: i32, f: i32, color: Color) -> bool {
+    fn is_attacked_by_friendly(
+        &self,
+        pos: &Position,
+        sq: u8,
+        r: i32,
+        f: i32,
+        color: Color,
+    ) -> bool {
         // Pawn attacks: a friendly pawn attacks this square if it's diagonally behind
         let pawn_dir: i32 = if color == Color::White { -1 } else { 1 };
         for df in [-1i32, 1] {
             let pr = r + pawn_dir;
             let pf = f + df;
-            if pr >= 0 && pr < 8 && pf >= 0 && pf < 8 {
+            if (0..8).contains(&pr) && (0..8).contains(&pf) {
                 let ps = (pr * 8 + pf) as usize;
                 let p = pos.board[ps];
                 if p.piece_type == PieceType::Pawn && p.color == color {
@@ -387,7 +357,7 @@ impl WardenEngine {
         for &(dr, df) in &KNIGHT_OFFSETS {
             let nr = r + dr;
             let nf = f + df;
-            if nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+            if (0..8).contains(&nr) && (0..8).contains(&nf) {
                 let ns = (nr * 8 + nf) as usize;
                 let p = pos.board[ns];
                 if p.piece_type == PieceType::Knight && p.color == color {
@@ -400,7 +370,7 @@ impl WardenEngine {
         for &(dr, df) in &BISHOP_DIRS {
             let mut nr = r + dr;
             let mut nf = f + df;
-            while nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+            while (0..8).contains(&nr) && (0..8).contains(&nf) {
                 let ns = (nr * 8 + nf) as usize;
                 let p = pos.board[ns];
                 if !p.is_empty() {
@@ -421,7 +391,7 @@ impl WardenEngine {
         for &(dr, df) in &ROOK_DIRS {
             let mut nr = r + dr;
             let mut nf = f + df;
-            while nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+            while (0..8).contains(&nr) && (0..8).contains(&nf) {
                 let ns = (nr * 8 + nf) as usize;
                 let p = pos.board[ns];
                 if !p.is_empty() {
@@ -441,10 +411,12 @@ impl WardenEngine {
         // King attacks
         for dr in -1..=1i32 {
             for df in -1..=1i32 {
-                if dr == 0 && df == 0 { continue; }
+                if dr == 0 && df == 0 {
+                    continue;
+                }
                 let nr = r + dr;
                 let nf = f + df;
-                if nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+                if (0..8).contains(&nr) && (0..8).contains(&nf) {
                     let ns = (nr * 8 + nf) as usize;
                     let p = pos.board[ns];
                     if p.piece_type == PieceType::King && p.color == color && ns as u8 != sq {
@@ -473,7 +445,7 @@ impl WardenEngine {
             let mut nf = kf + df;
             let mut friendly_count = 0i32;
 
-            while nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+            while (0..8).contains(&nr) && (0..8).contains(&nf) {
                 let ns = (nr * 8 + nf) as usize;
                 let p = pos.board[ns];
                 if p.is_empty() {
@@ -564,7 +536,7 @@ impl WardenEngine {
                 let mut nf = f + df;
                 let mut has_friendly_between = false;
 
-                while nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+                while (0..8).contains(&nr) && (0..8).contains(&nf) {
                     let ns = (nr * 8 + nf) as usize;
                     let p = pos.board[ns];
                     if p.is_empty() {
@@ -638,10 +610,10 @@ impl WardenEngine {
                 let mut passed = true;
                 let dir: i32 = if c == Color::White { 1 } else { -1 };
                 let mut fr = r + dir;
-                'passed_check: while fr >= 0 && fr < 8 && passed {
+                'passed_check: while (0..8).contains(&fr) && passed {
                     for df in -1..=1 {
                         let ff = f + df;
-                        if ff < 0 || ff > 7 {
+                        if !(0..=7).contains(&ff) {
                             continue;
                         }
                         let cs = (fr * 8 + ff) as u8;
@@ -664,11 +636,9 @@ impl WardenEngine {
             if pt == PieceType::Bishop {
                 bishop_count[ci] += 1;
             }
-            if pt == PieceType::Rook || pt == PieceType::Queen {
-                if slider_n[ci] < 16 {
-                    slider_sq[ci][slider_n[ci]] = sq;
-                    slider_n[ci] += 1;
-                }
+            if (pt == PieceType::Rook || pt == PieceType::Queen) && slider_n[ci] < 16 {
+                slider_sq[ci][slider_n[ci]] = sq;
+                slider_n[ci] += 1;
             }
 
             // Track non-king pieces for push awareness
@@ -754,7 +724,7 @@ impl WardenEngine {
                 let pf = psq & 7;
                 let file_dist = (pf - kf).abs();
                 let rank_ahead = (pr - kr) * shield_dir;
-                if file_dist <= 1 && rank_ahead >= 1 && rank_ahead <= 2 {
+                if file_dist <= 1 && (1..=2).contains(&rank_ahead) {
                     sc_pos += sign * 15;
                 }
             }
@@ -798,7 +768,7 @@ impl WardenEngine {
                     }
                     let nr = kr + dr;
                     let nf = kf + df;
-                    if nr < 0 || nr > 7 || nf < 0 || nf > 7 {
+                    if !(0..=7).contains(&nr) || !(0..=7).contains(&nf) {
                         continue;
                     }
                     let ns = (nr * 8 + nf) as u8;
@@ -810,7 +780,7 @@ impl WardenEngine {
                         adj_friendly += 1;
                         let er = nr + dr;
                         let ef = nf + df;
-                        if er >= 0 && er <= 7 && ef >= 0 && ef <= 7 {
+                        if (0..=7).contains(&er) && (0..=7).contains(&ef) {
                             let es = (er * 8 + ef) as u8;
                             if pos.board[es as usize].is_empty() {
                                 push_escapes += 1;
@@ -869,9 +839,9 @@ impl WardenEngine {
 
         for i in 0..ml.moves.len() {
             let m = &ml.moves[i];
-            let s: f32;
-            if *m == *ttm {
-                s = 1e7;
+
+            let s: f32 = if *m == *ttm {
+                1e7
             } else {
                 let mut sv: f32 = 0.0;
                 if !pos.board[m.to as usize].is_empty() {
@@ -903,16 +873,20 @@ impl WardenEngine {
                 if *m == cm {
                     sv += 60000.0;
                 }
-                sv += self.history[pos.side_to_move as usize][m.from as usize][m.to as usize] as f32;
-                s = sv;
-            }
+                sv +=
+                    self.history[pos.side_to_move as usize][m.from as usize][m.to as usize] as f32;
+                sv
+            };
             scores[i] = s;
         }
 
         // Selection sort with NEON-accelerated max finding
         for i in 0..ml.moves.len() {
             let best_idx = find_max_index(&scores, i, ml.moves.len());
-            if best_idx != i { ml.moves.swap(i, best_idx); scores.swap(i, best_idx); }
+            if best_idx != i {
+                ml.moves.swap(i, best_idx);
+                scores.swap(i, best_idx);
+            }
         }
     }
 
@@ -1008,7 +982,7 @@ impl WardenEngine {
             self.move_buf = buf;
         }
 
-        if ml.moves.len() == 0 {
+        if ml.moves.is_empty() {
             return if in_check { -99000 + ply } else { 0 };
         }
         self.order_moves(pos, &mut ml, ply as usize, &ttm);
@@ -1054,10 +1028,19 @@ impl WardenEngine {
                 }
                 r = r.clamp(1, depth - 1);
 
-                let s0 = -self.search(pos, depth - 1 - r, -(alpha + 1), -alpha, ply + 1, gives_check, false);
+                let s0 = -self.search(
+                    pos,
+                    depth - 1 - r,
+                    -(alpha + 1),
+                    -alpha,
+                    ply + 1,
+                    gives_check,
+                    false,
+                );
                 if s0 > alpha && !self.stopped {
                     self.lmr_re += 1;
-                    score = -self.search(pos, depth - 1, -beta, -alpha, ply + 1, gives_check, is_pv);
+                    score =
+                        -self.search(pos, depth - 1, -beta, -alpha, ply + 1, gives_check, is_pv);
                 } else {
                     score = s0;
                 }
@@ -1065,14 +1048,38 @@ impl WardenEngine {
                 // Check extension up to depth 4 (chimera conservative)
                 let ext = if gives_check && depth <= 4 { 1 } else { 0 };
                 if i > 0 && !self.stopped {
-                    let s1 = -self.search(pos, depth - 1 + ext, -(alpha + 1), -alpha, ply + 1, gives_check, false);
+                    let s1 = -self.search(
+                        pos,
+                        depth - 1 + ext,
+                        -(alpha + 1),
+                        -alpha,
+                        ply + 1,
+                        gives_check,
+                        false,
+                    );
                     if s1 > alpha && s1 < beta && !self.stopped {
-                        score = -self.search(pos, depth - 1 + ext, -beta, -alpha, ply + 1, gives_check, is_pv);
+                        score = -self.search(
+                            pos,
+                            depth - 1 + ext,
+                            -beta,
+                            -alpha,
+                            ply + 1,
+                            gives_check,
+                            is_pv,
+                        );
                     } else {
                         score = s1;
                     }
                 } else {
-                    score = -self.search(pos, depth - 1 + ext, -beta, -alpha, ply + 1, gives_check, is_pv);
+                    score = -self.search(
+                        pos,
+                        depth - 1 + ext,
+                        -beta,
+                        -alpha,
+                        ply + 1,
+                        gives_check,
+                        is_pv,
+                    );
                 }
             }
             pos.unmake_move();
@@ -1099,7 +1106,8 @@ impl WardenEngine {
                     *h = (*h + (depth * depth) as i16).min(16000);
                     for j in 0..i {
                         if pos.board[ml.moves[j].to as usize].is_empty() {
-                            let hh = &mut self.history[ci][ml.moves[j].from as usize][ml.moves[j].to as usize];
+                            let hh = &mut self.history[ci][ml.moves[j].from as usize]
+                                [ml.moves[j].to as usize];
                             *hh = (*hh - depth as i16).max(-16000);
                         }
                     }
@@ -1232,7 +1240,7 @@ impl WardenEngine {
             let mut buf = std::mem::take(&mut self.move_buf);
             buf.clear();
             generate_legal_moves(pos, &mut buf);
-            let found = buf.iter().any(|lm| *lm == m);
+            let found = buf.contains(&m);
             self.move_buf = buf;
             if !found {
                 break;
@@ -1281,13 +1289,18 @@ impl WardenEngine {
             }
             ranked.push((uci, sc));
         }
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        ranked.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         let cap = ranked.len().min(32);
 
         let mut diag = format!(
             r#"{{"engine":"warden_001","qn":{},"tt":{},"bcut":{},"fcut":{},"nmp":{},"lmr":[{},{}],"top_moves":["#,
-            self.qnodes, self.tt_hits, self.beta_cuts, self.first_cuts,
-            self.null_cuts, self.lmr_tries, self.lmr_re,
+            self.qnodes,
+            self.tt_hits,
+            self.beta_cuts,
+            self.first_cuts,
+            self.null_cuts,
+            self.lmr_tries,
+            self.lmr_re,
         );
         for i in 0..cap {
             if i > 0 {
@@ -1342,7 +1355,7 @@ impl Engine for WardenEngine {
 
         let mut stats = SearchStats::default();
 
-        if root.moves.len() == 0 {
+        if root.moves.is_empty() {
             return (Move::default(), stats);
         }
         if root.moves.len() == 1 {
@@ -1397,9 +1410,18 @@ impl Engine for WardenEngine {
 
                     let score;
                     if i > 0 && !self.stopped {
-                        let s1 = -self.search(pos, depth - 1, -(alpha + 1), -alpha, 1, gives_check, false);
+                        let s1 = -self.search(
+                            pos,
+                            depth - 1,
+                            -(alpha + 1),
+                            -alpha,
+                            1,
+                            gives_check,
+                            false,
+                        );
                         if s1 > alpha && s1 < beta && !self.stopped {
-                            score = -self.search(pos, depth - 1, -beta, -alpha, 1, gives_check, true);
+                            score =
+                                -self.search(pos, depth - 1, -beta, -alpha, 1, gives_check, true);
                         } else {
                             score = s1;
                         }
@@ -1485,11 +1507,9 @@ impl Engine for WardenEngine {
         // Re-validate: generate fresh legal moves and verify best is among them
         let mut validation_buf = Vec::new();
         generate_legal_moves(pos, &mut validation_buf);
-        let revalid = validation_buf.iter().any(|m| *m == best);
-        if !revalid {
-            if !validation_buf.is_empty() {
-                best = validation_buf[0];
-            }
+        let revalid = validation_buf.contains(&best);
+        if !revalid && !validation_buf.is_empty() {
+            best = validation_buf[0];
         }
 
         stats.nodes = self.nodes;

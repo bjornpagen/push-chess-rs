@@ -1,5 +1,6 @@
-pub mod types;
-pub mod zobrist;
+pub mod children;
+pub mod movegen;
 pub mod position;
 pub mod push;
-pub mod movegen;
+pub mod types;
+pub mod zobrist;
