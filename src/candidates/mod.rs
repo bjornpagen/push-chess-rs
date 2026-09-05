@@ -1,6 +1,7 @@
 pub mod abyss;
 pub mod apex;
 pub mod apotheosis;
+pub mod astra;
 pub mod avalanche;
 pub mod blade;
 pub mod catalyst;
@@ -44,6 +45,10 @@ use crate::engine::EngineEntry;
 
 // Selectable engines. Other modules above retain historical experiments.
 pub const ENGINE_REGISTRY: &[EngineEntry] = &[
+    EngineEntry {
+        name: "astra",
+        create: astra::create,
+    },
     EngineEntry {
         name: "phantom",
         create: phantom::create,

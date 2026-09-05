@@ -81,6 +81,7 @@ fn derive_generation(name: &str) -> i32 {
         | "knight_king" => 9,
         "singularity" => 10,
         "omega" | "zenith" => 11,
+        "astra" => 13,
         _ => 12,
     }
 }

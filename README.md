@@ -18,7 +18,7 @@ Moves must leave the moving side's king safe.
 - `src/core/`: board state, move generation, push resolution, move undo, and
   position hashing.
 - `src/engine.rs`: the common engine interface and factory entry type.
-- `src/candidates/`: 41 experimental engine implementations; 23 are selectable
+- `src/candidates/`: 42 experimental engine implementations; 24 are selectable
   through `ENGINE_REGISTRY` in `mod.rs`. Unregistered engines are retained as
   historical experiments and still compiled.
 - `src/bin/showdown.rs`: matches, round-robin tournaments, standings, and SQLite
@@ -63,9 +63,9 @@ cargo run --release --bin showdown -- tournament elite4 1000000 8 void chronos o
 write to `pushchess.db` by default. Plain `play` defaults to Oblivion, not the
 latest tournament winner.
 
-## Latest saved winner: Void
+## Previous elite tournament: Void
 
-Snapshot inspected September 5, 2026. The latest stored tournament is #12,
+Snapshot inspected before Astra's debut on September 5, 2026. Tournament #12,
 `elite4f`, started at database timestamp `2026-04-02 00:41:13`, with a one-second
 move budget and eight games per pairing. No new tournament was run for this
 snapshot.
@@ -109,7 +109,36 @@ position; the current Void and Chronos implementations ignore their game seeds.
 The database stores engines by name with empty source hashes, so historical
 results cannot be reliably tied to exact source revisions. All-time percentages
 also mix different opponents and budgets. Treat Void as the latest recorded
-winner, not a conclusively established strongest engine.
+winner of that event, not a conclusively established strongest engine.
+
+## Latest elite winner: Astra
+
+`src/candidates/astra.rs` introduces generation 13. Its search uses pseudo-legal
+move generation and checks legality only when visiting a move, check-aware
+quiescence (including quiet evasions), ply-normalized mate scores in a full-key
+two-way position cache, repetition detection, guarded null-move pruning, and
+iterative deepening with aspiration windows. Its evaluation includes phase-aware
+king placement, pawn shelter, passed pawns, and latent attack lines. Push ordering
+recognizes friendly pieces along an entire path, including knight paths and
+moves to empty destinations.
+
+It respects time, node, and depth budgets, reports only completed search depths,
+and does not use opponent identities or saved tournament results to choose moves.
+
+```sh
+cargo run --release --bin play -- astra white 1000
+cargo run --release --bin showdown -- tournament astra_debut_001 1000000 8 astra void chronos oblivion
+```
+
+The debut uses the same one-second move budget and eight games per pairing as
+the previous elite tournament. Its results must be interpreted separately:
+the shared push-cascade fixes landed after the older tournaments.
+
+Astra won the completed 48-game tournament #13, finishing its own 24 games at
+**17W / 2D / 5L (75%)**, ahead of Void (52.1%), Oblivion (45.8%), and Chronos
+(27.1%). It won the head-to-head match against each incumbent.
+See [the debut report](docs/astra-debut.md)
+for match scores, verification, and source fingerprints.
 
 ## Representation-first refactor
 
