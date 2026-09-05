@@ -3,7 +3,8 @@
 A Rust engine-development arena for a chess variant where pieces can push
 friendly pieces along their movement paths. Includes shared rules, experimental
 engines, automated matches, a playable terminal interface, and replay tools.
-This is not an ordinary-chess engine or a neural-network training project.
+This is not an ordinary-chess engine. Cataclysm also includes a small,
+outcome-trained neural evaluator and an entirely Rust training tool.
 
 ## Rules in brief
 
@@ -18,7 +19,7 @@ Moves must leave the moving side's king safe.
 - `src/core/`: board state, move generation, push resolution, move undo, and
   position hashing.
 - `src/engine.rs`: the common engine interface and factory entry type.
-- `src/candidates/`: 42 experimental engine implementations; 24 are selectable
+- `src/candidates/`: 43 experimental engine implementations; 25 are selectable
   through `ENGINE_REGISTRY` in `mod.rs`. Unregistered engines are retained as
   historical experiments and still compiled.
 - `src/bin/showdown.rs`: matches, round-robin tournaments, standings, and SQLite
@@ -26,6 +27,12 @@ Moves must leave the moving side's king safe.
 - `src/bin/play.rs`: human versus engine in a terminal interface.
 - `src/bin/replay.rs`: browse and replay saved games in a terminal interface.
 - `src/bin/dump.rs`: textual tournament/match reports with detailed telemetry.
+- `src/bin/study.rs`: read-only reconstruction of every saved game and move.
+- `src/bin/verify_history.rs`: differential validation of Cataclysm's board
+  transactions against the shared rules on every saved position.
+- `src/bin/train_cataclysm.rs`: reproducible, outcome-only neural training in Rust.
+- `src/bin/evolve.rs`: bounded self-play, warm-start training, and held-out
+  promotion gates; never automatically replaces the deployed model.
 - `tests/core_tests.rs`: 23 tests of the shared rules and board operations.
 
 ## Run
@@ -140,6 +147,58 @@ Astra won the completed 48-game tournament #13, finishing its own 24 games at
 See [the debut report](docs/astra-debut.md)
 for match scores, verification, and source fingerprints.
 
+## Cataclysm: generation 14
+
+Cataclysm is independently implemented around compiled push transactions,
+incremental position features, a 32-unit neural evaluator, and a separate
+AND/OR solver for forcing mates. The neural model learns from final game
+outcomes, not engine identities or recorded move choices. Its evaluation is
+blended with explicit piece placement and pawn-race terms. All training and
+inference code is Rust; inference has no GPU or external-model dependency.
+
+The [complete history audit](docs/history-audit-001.md) reconstructs all 974 game
+rows and 69,904 moves present across both databases before development began.
+It includes a per-game ledger and distinguishes old rule-version differences.
+The audit also exposed friendly pushes incorrectly logged as captures. The
+runner now records only enemy captures and uses the shared board's draw clock;
+existing historical rows are deliberately unchanged.
+
+```sh
+cargo run --release --bin play -- cataclysm white 1000
+cargo run --release --bin study -- new-audit.md pushchess.db src/candidates/pushchess.db
+cargo run --release --bin verify_history -- pushchess.db src/candidates/pushchess.db
+
+# Reproduce the embedded model from the pre-development history snapshot.
+cargo run --release --bin train_cataclysm -- src/candidates/cataclysm/network.bin docs/cataclysm-training.json 40 932 pushchess.db src/candidates/pushchess.db
+
+# Limit simultaneous games to reduce scheduling noise in short-budget tests.
+SHOWDOWN_JOBS=2 cargo run --release --bin showdown -- cataclysm astra 8 200000
+```
+
+The trainer uses 709 distinct games for training and 171 for validation. Duplicate
+games and exact validation positions shared with training are removed. It
+selects the best validation checkpoint, not the last training epoch. See the
+[training metrics](docs/cataclysm-training.json). Better predictive loss is not
+by itself evidence of better tournament play.
+
+The tested release scored **81W / 3D / 12L (85.9%)** in a 96-game full-roster
+gauntlet, including **3–1 against Astra**, but lost its matchups against Void
+and Eternity. This was not a full round robin. Three subsequent self-play
+generations produced no reliable improvement, so the original model remains
+deployed. See [the Cataclysm report](docs/cataclysm-debut.md) for the complete
+results, rejected candidates, and fingerprints.
+
+Omit the engine list to run a full-roster tournament. Random legal openings
+are paired identically with colors reversed; all opening moves remain logged.
+`SHOWDOWN_NODES` optionally adds a node cap (only engines implementing it obey
+it); time limits still apply. These controls also support reproducible data
+collection without changing ordinary play.
+
+```sh
+SHOWDOWN_JOBS=6 SHOWDOWN_OPENING_PLIES=6 SHOWDOWN_OPENING_SEED=20260905 \
+  cargo run --release --bin showdown -- tournament cataclysm_full_001 250000 4
+```
+
 ## Representation-first refactor
 
 - Push resolution returns `Option<PushPlan>`: illegal paths cannot masquerade
@@ -187,8 +246,8 @@ correct. Rerun competitive tournaments before declaring a new winner.
 - `target/` contains generated binaries and build caches. `cargo clean` removes
   them; later builds regenerate them and take longer.
 - Keep `Cargo.lock`: it pins dependency versions for reproducible builds.
-- Keep `pushchess.db`: the inspected database contains 884 game rows and 62,872
-  move records, not disposable cache data. It is ignored by Git, so back it up
+- Keep `pushchess.db`: it contains saved games and move-by-move telemetry,
+  not disposable cache data. It is ignored by Git, so back it up
   separately. SQLite `-wal` and `-shm` sidecars are not arbitrary junk either.
 - Keep historical candidate source files unless deliberately retiring those
   experiments. A low score or absence from the selectable roster is not enough

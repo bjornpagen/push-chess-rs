@@ -1,4 +1,5 @@
 /target
+/experiments
 pushchess.db
 pushchess.db-wal
 pushchess.db-shm

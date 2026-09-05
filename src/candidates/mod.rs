@@ -4,6 +4,7 @@ pub mod apotheosis;
 pub mod astra;
 pub mod avalanche;
 pub mod blade;
+pub mod cataclysm;
 pub mod catalyst;
 pub mod chimera;
 pub mod chronos;
@@ -45,6 +46,10 @@ use crate::engine::EngineEntry;
 
 // Selectable engines. Other modules above retain historical experiments.
 pub const ENGINE_REGISTRY: &[EngineEntry] = &[
+    EngineEntry {
+        name: "cataclysm",
+        create: cataclysm::create,
+    },
     EngineEntry {
         name: "astra",
         create: astra::create,
@@ -144,6 +149,20 @@ pub const ENGINE_REGISTRY: &[EngineEntry] = &[
 ];
 
 pub fn find_engine(name: &str) -> Option<&'static EngineEntry> {
+    // Explicit benchmark aliases are not extra engines in the regular roster.
+    static MODELS: [EngineEntry; 2] = [
+        EngineEntry {
+            name: "cataclysm-reference",
+            create: cataclysm::create_reference,
+        },
+        EngineEntry {
+            name: "cataclysm-candidate",
+            create: cataclysm::create_candidate,
+        },
+    ];
+    if let Some(entry) = MODELS.iter().find(|entry| entry.name == name) {
+        return Some(entry);
+    }
     ENGINE_REGISTRY.iter().find(|e| e.name == name)
 }
 mod support;

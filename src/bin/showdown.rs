@@ -42,6 +42,50 @@ fn special_str(s: SpecialMove) -> &'static str {
     }
 }
 
+/// A friendly destination is a push, not captured material. Keep telemetry
+/// consistent with the rules board rather than inferring captures from occupancy.
+fn captured_piece(pos: &Position, mv: Move) -> PieceType {
+    if mv.special == SpecialMove::EnPassant {
+        PieceType::Pawn
+    } else {
+        let target = pos.board[mv.to as usize];
+        if target.is_color(opponent(pos.side_to_move)) {
+            target.piece_type
+        } else {
+            PieceType::None
+        }
+    }
+}
+
+fn worker_count() -> usize {
+    let available = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+    std::env::var("SHOWDOWN_JOBS")
+        .ok()
+        .map(|s| {
+            s.parse::<usize>()
+                .expect("SHOWDOWN_JOBS must be a positive integer")
+        })
+        .map(|n| {
+            assert!(n > 0, "SHOWDOWN_JOBS must be positive");
+            n.min(available)
+        })
+        .unwrap_or(available)
+}
+
+fn opening_seed(game: usize, base: u64, selfplay: bool) -> u64 {
+    base.wrapping_add((if selfplay { game - 1 } else { (game - 1) / 2 }) as u64 * 0x100000001b3)
+}
+
+fn random_index(state: &mut u64, len: usize) -> usize {
+    *state = state.wrapping_add(0x9e3779b97f4a7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    ((z ^ (z >> 31)) as usize) % len
+}
+
 fn sq_name(sq: Square) -> String {
     let file = (b'a' + sq % 8) as char;
     let rank = (b'1' + sq / 8) as char;
@@ -82,6 +126,7 @@ fn derive_generation(name: &str) -> i32 {
         "singularity" => 10,
         "omega" | "zenith" => 11,
         "astra" => 13,
+        "cataclysm" | "cataclysm-reference" | "cataclysm-candidate" => 14,
         _ => 12,
     }
 }
@@ -382,9 +427,33 @@ fn play_game(
 
     let mut zobrist_history: Vec<u64> = Vec::with_capacity(MAX_PLY as usize);
     zobrist_history.push(pos.zobrist);
-    let mut halfmove_clock: i32 = 0;
 
     let verbose = std::env::var("SHOWDOWN_VERBOSE").is_ok();
+    let opening_plies: i32 = std::env::var("SHOWDOWN_OPENING_PLIES")
+        .ok()
+        .map(|s| s.parse().expect("invalid opening plies"))
+        .unwrap_or(0);
+    assert!(
+        (0..=20).contains(&opening_plies),
+        "opening plies must be 0..=20"
+    );
+    let nodes: i64 = std::env::var("SHOWDOWN_NODES")
+        .ok()
+        .map(|s| s.parse().expect("invalid node budget"))
+        .unwrap_or(0);
+    assert!(nodes >= 0, "node budget cannot be negative");
+    let base: u64 = std::env::var("SHOWDOWN_OPENING_SEED")
+        .ok()
+        .map(|s| s.parse().expect("invalid opening seed"))
+        .unwrap_or(1);
+    let game_num: usize = conn
+        .query_row(
+            "SELECT game_num FROM games WHERE game_id=?1",
+            [game_id],
+            |r| r.get(0),
+        )
+        .expect("saved game number");
+    let mut opening_random = opening_seed(game_num, base, white_id == black_id);
 
     for ply in 0..MAX_PLY {
         let stm = pos.side_to_move;
@@ -416,7 +485,7 @@ fn play_game(
             break;
         }
 
-        if halfmove_clock >= 100 {
+        if pos.halfmove_clock >= 100 {
             out.result = GameResult::Draw;
             out.termination = "50_move_rule".to_string();
             out.ply_count = ply;
@@ -441,6 +510,7 @@ fn play_game(
 
         let budget = SearchBudget {
             max_time_us: budget_us,
+            max_nodes: nodes,
             seed: game_seed ^ (ply as u64),
             ..SearchBudget::default()
         };
@@ -452,7 +522,17 @@ fn play_game(
         };
 
         let t0 = Instant::now();
-        let (chosen, mut stats) = eng.choose_move(&mut pos, &budget);
+        let (chosen, mut stats) = if ply < opening_plies {
+            (
+                legal[random_index(&mut opening_random, legal.len())],
+                SearchStats {
+                    diag_json: "{\"opening\":true}".to_owned(),
+                    ..SearchStats::default()
+                },
+            )
+        } else {
+            eng.choose_move(&mut pos, &budget)
+        };
         let elapsed_us = t0.elapsed().as_micros() as i64;
         stats.time_used_us = elapsed_us;
 
@@ -482,22 +562,10 @@ fn play_game(
         }
 
         let mover = pos.board[chosen.from as usize].piece_type;
-        let mut captured = if pos.board[chosen.to as usize].is_empty() {
-            PieceType::None
-        } else {
-            pos.board[chosen.to as usize].piece_type
-        };
-        if chosen.special == SpecialMove::EnPassant {
-            captured = PieceType::Pawn;
-        }
+        let captured = captured_piece(&pos, chosen);
 
         pos.make_move(&chosen);
         zobrist_history.push(pos.zobrist);
-        if captured != PieceType::None || mover == PieceType::Pawn {
-            halfmove_clock = 0;
-        } else {
-            halfmove_clock += 1;
-        }
 
         let fen_after = pos.to_fen();
         ensure_position(&conn, &pos);
@@ -817,7 +885,21 @@ fn run_tournament(
     games_per: i32,
     engines: &[String],
     db_path: &str,
+    gauntlet: bool,
 ) -> i32 {
+    if budget_us <= 0 || games_per <= 0 || engines.len() < 2 {
+        eprintln!("Need positive budgets/game counts and at least two engines");
+        return 1;
+    }
+    if engines
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        != engines.len()
+    {
+        eprintln!("Duplicate engines are not allowed");
+        return 1;
+    }
     let conn = Connection::open(db_path).expect("failed to open DB");
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
         .ok();
@@ -835,7 +917,7 @@ fn run_tournament(
     }
 
     let n = ids.len();
-    let pairings = n * (n - 1) / 2;
+    let pairings = if gauntlet { n - 1 } else { n * (n - 1) / 2 };
     let total_games = pairings * (games_per as usize);
 
     conn.execute(
@@ -846,9 +928,13 @@ fn run_tournament(
     let tid = conn.last_insert_rowid();
 
     println!("=== TOURNAMENT \"{}\" (#{}) ===", name, tid);
-    let max_concurrent = std::thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(4);
+    if gauntlet {
+        println!(
+            "  Gauntlet: {} against every other entrant (not a full round robin)",
+            ids[0]
+        );
+    }
+    let max_concurrent = worker_count();
     println!(
         "  {} engines, {} pairings x {} games = {} total games ({} concurrent)",
         n, pairings, games_per, total_games, max_concurrent
@@ -860,6 +946,9 @@ fn run_tournament(
 
     let mut matchup = 0i32;
     for i in 0..n {
+        if gauntlet && i != 0 {
+            continue;
+        }
         for j in (i + 1)..n {
             matchup += 1;
 
@@ -1183,9 +1272,7 @@ fn run_standalone_match(
     let print_mu = Mutex::new(());
     let next_idx = AtomicUsize::new(0);
     let total = slots.len();
-    let max_concurrent = std::thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(4);
+    let max_concurrent = worker_count();
 
     // Collect results
     let outcomes: Vec<Mutex<Option<(GameResult, bool)>>> =
@@ -1312,9 +1399,9 @@ fn run_standalone_match(
             let cid: String = row.get(0).unwrap();
             let avg_nodes: f64 = row.get(1).unwrap_or(0.0);
             let avg_depth: f64 = row.get(2).unwrap_or(0.0);
-            let avg_time: i32 = row.get(3).unwrap_or(0);
+            let avg_time: f64 = row.get(3).unwrap_or(0.0);
             println!(
-                "  {}: avg {:.0} nodes, depth {:.1}, {}ms",
+                "  {}: avg {:.0} nodes, depth {:.1}, {:.0}ms",
                 cid, avg_nodes, avg_depth, avg_time
             );
         }
@@ -1334,10 +1421,12 @@ fn main() {
         eprintln!(
             "Usage:\n\
              \x20 {} <engine1> <engine2> <N> [budget_us] [db_path]                -- match\n\
-             \x20 {} tournament <name> <budget_us> <games_per> e1 e2 [e3 ...]     -- tournament\n\
+             \x20 {} tournament <name> <budget_us> <games_per> [e1 e2 ...]      -- full roster by default\n\
+             \x20 {} gauntlet <name> <budget_us> <games_per> challenger [e1 ...] -- challenger vs roster\n\
              \x20 {} standings [db_path]                                           -- standings\n\
              \x20 {} purge-db [db_path]                                            -- delete db\n\
              Engines: {}",
+            args[0],
             args[0],
             args[0],
             args[0],
@@ -1386,10 +1475,40 @@ fn main() {
         std::process::exit(0);
     }
 
-    if mode == "tournament" {
+    if mode == "gauntlet" {
         if args.len() < 6 {
             eprintln!(
-                "Usage: {} tournament <name> <budget_us> <games_per> e1 e2 [e3 ...]",
+                "Usage: {} gauntlet <name> <budget_us> <games_per> <challenger> [opponents...]",
+                args[0]
+            );
+            std::process::exit(1);
+        }
+        let mut engines = vec![args[5].clone()];
+        if args.len() > 6 {
+            engines.extend_from_slice(&args[6..]);
+        } else {
+            engines.extend(
+                ENGINE_REGISTRY
+                    .iter()
+                    .filter(|entry| entry.name != args[5])
+                    .map(|entry| entry.name.to_owned()),
+            );
+        }
+        let rc = run_tournament(
+            &args[2],
+            args[3].parse().expect("invalid budget_us"),
+            args[4].parse().expect("invalid games_per"),
+            &engines,
+            "pushchess.db",
+            true,
+        );
+        std::process::exit(rc);
+    }
+
+    if mode == "tournament" {
+        if args.len() < 5 {
+            eprintln!(
+                "Usage: {} tournament <name> <budget_us> <games_per> [e1 e2 ...] (default: full roster)",
                 args[0]
             );
             std::process::exit(1);
@@ -1397,12 +1516,16 @@ fn main() {
         let name = &args[2];
         let budget_us: i64 = args[3].parse().expect("invalid budget_us");
         let games_per: i32 = args[4].parse().expect("invalid games_per");
-        let engines: Vec<String> = args[5..].to_vec();
+        let engines: Vec<String> = if args.len() == 5 {
+            ENGINE_REGISTRY.iter().map(|e| e.name.to_owned()).collect()
+        } else {
+            args[5..].to_vec()
+        };
         if engines.len() < 2 {
             eprintln!("Need at least 2 engines");
             std::process::exit(1);
         }
-        let rc = run_tournament(name, budget_us, games_per, &engines, "pushchess.db");
+        let rc = run_tournament(name, budget_us, games_per, &engines, "pushchess.db", false);
         std::process::exit(rc);
     }
 
@@ -1430,4 +1553,71 @@ fn main() {
 
     let rc = run_standalone_match(e1, e2, num_games, budget_us, db_path);
     std::process::exit(rc);
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[test]
+    fn paired_openings_swap_colors_without_changing_the_position() {
+        let opening = |game, selfplay| {
+            let mut pos = start_position();
+            let mut random = opening_seed(game, 42, selfplay);
+            for _ in 0..6 {
+                let mut legal = Vec::new();
+                generate_legal_moves(&mut pos, &mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                pos.make_move(&legal[random_index(&mut random, legal.len())]);
+            }
+            pos.to_fen()
+        };
+        assert_eq!(opening(1, false), opening(2, false));
+        assert_eq!(opening(3, false), opening(4, false));
+        assert_ne!(opening(1, true), opening(2, true));
+    }
+
+    fn apply(fen: &str, from: u8, to: u8) -> (PieceType, u16) {
+        let mut pos = Position::empty();
+        pos.set_from_fen(fen);
+        let mut moves = Vec::new();
+        generate_legal_moves(&mut pos, &mut moves);
+        let mv = moves
+            .into_iter()
+            .find(|m| m.from == from && m.to == to)
+            .unwrap();
+        let captured = captured_piece(&pos, mv);
+        pos.make_move(&mv);
+        (captured, pos.halfmove_clock)
+    }
+
+    #[test]
+    fn friendly_push_is_not_a_capture_or_a_clock_reset() {
+        assert_eq!(
+            apply("7k/8/8/8/8/P7/R7/7K w - - 99 1", 8, 16),
+            (PieceType::None, 100)
+        );
+    }
+
+    #[test]
+    fn enemy_capture_and_en_passant_reset_the_clock() {
+        assert_eq!(
+            apply("7k/8/8/8/8/p7/R7/7K w - - 99 1", 8, 16),
+            (PieceType::Pawn, 0)
+        );
+        assert_eq!(
+            apply("7k/8/8/3pP3/8/8/8/7K w - d6 99 1", 36, 43),
+            (PieceType::Pawn, 0)
+        );
+    }
+
+    #[test]
+    fn pawn_initiated_push_still_resets_the_clock() {
+        assert_eq!(
+            apply("7k/8/8/8/8/R7/P7/7K w - - 99 1", 8, 16),
+            (PieceType::None, 0)
+        );
+    }
 }
