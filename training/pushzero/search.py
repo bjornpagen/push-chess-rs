@@ -1,14 +1,13 @@
-"""The Python search loop is just a batched neural-evaluation service.
+"""One native search scheduler, shared by rolling collection and finite queries.
 
-Rust owns scheduling, legal actions, tree traversal, terminal values, backup,
-and completed-Q policy targets. No per-tree/per-action hot-loop FFI calls.
+Search groups own trees. Inference leases own reply routing. The device owner
+serves one lease while independent native jobs prepare subsequent work.
 """
 from dataclasses import dataclass
-from contextlib import nullcontext
 import time
 import numpy as np
-from ._native import SearchBatch, SearchRuntime, observations
-from .model import action_bucket
+from ._native import SearchRuntime, observations
+from .protocol import action_bucket
 
 
 @dataclass
@@ -22,50 +21,74 @@ class SearchResult:
     selected_value: float = 0.0
 
 
+class SearchDriver:
+    def __init__(self, predictor, actors):
+        self.predictor = predictor
+        self.group_size = min(predictor.group_size, predictor.batch_size)
+        lanes = (actors + self.group_size - 1) // self.group_size
+        if lanes < 1:
+            raise ValueError("search requires actors")
+        runtime = predictor._runtime
+        if runtime is not None and not runtime.idle:
+            raise RuntimeError("predictor already owns active searches")
+        if runtime is None or runtime.lane_count < lanes:
+            if runtime is not None: runtime.close()
+            runtime = predictor._runtime = SearchRuntime(predictor.workers, lanes, predictor.batch_size)
+        self.runtime, self.roots = runtime, {}
+        self.native_begin, self.calls_begin = runtime.native_seconds, runtime.ffi_calls
+
+    def start(self, lane, states, rng, simulations, candidates=16, explore=True, max_nodes=16384):
+        roots = [tuple(o) if self.predictor.with_effects else tuple(o[:3])
+                 for o in observations(states, self.predictor.with_effects)]
+        width = action_bucket(max(len(o[1]) for o in roots))
+        noise = (rng.gumbel(size=(len(states), width)).astype(np.float32) if explore
+                 else np.zeros((len(states), width), np.float32))
+        self.runtime.start(lane, states, noise, simulations, candidates,
+                           effects=self.predictor.with_effects, max_nodes=max_nodes)
+        self.roots[lane] = roots
+
+    def poll(self):
+        request, completed = self.runtime.poll(1000)
+        # Returned replies start native CPU work before the next GPU call.
+        if request is not None:
+            request_id, boards, actions, lengths, tokens = request
+            logits, values = self.predictor.packed(boards, actions, lengths=lengths, effects=tokens)
+            self.runtime.submit(request_id, logits, values)
+        return [(lane, [SearchResult(move, root, policy, visits, nodes, raw, chosen)
+                        for root, (move, policy, visits, nodes, raw, chosen)
+                        in zip(self.roots.pop(lane), rows, strict=True)]) for lane, rows in completed]
+
+    def finish(self):
+        if self.roots or not self.runtime.idle:
+            raise RuntimeError("cannot release unfinished searches")
+        p = self.predictor
+        p.native_seconds += self.runtime.native_seconds - self.native_begin
+        p.search_calls += self.runtime.ffi_calls - self.calls_begin
+        p.last_search_metrics = self.runtime.metrics()
+
+    def abort(self):
+        self.runtime.close()
+        self.predictor._runtime = None
+
+
 def search(states, predictor, rng, simulations=64, candidates=16, explore=True, *,
            deadline=float("inf"), stop=lambda: False, max_nodes=16384):
-    # One coordinator per predictor/model. The inference lock is reentrant, so
-    # its packed calls remain safe inside a whole-search lease.
-    with getattr(predictor, "_lock", nullcontext()):
-        return _search(states, predictor, rng, simulations, candidates, explore, deadline=deadline, stop=stop, max_nodes=max_nodes)
-
-
-def _search(states, predictor, rng, simulations, candidates, explore, *, deadline, stop, max_nodes):
     if simulations < 1 or candidates < 1:
         raise ValueError("simulations and candidates must be positive")
     if not states:
         return []
-    effects = getattr(predictor, "with_effects", False)
-    roots = [tuple(o) if effects else tuple(o[:3]) for o in observations(states, effects)]
-    width = action_bucket(max(len(o[1]) for o in roots))
-    noise = (rng.gumbel(size=(len(states), width)).astype(np.float32) if explore
-             else np.zeros((len(states), width), np.float32))
-    pooled = getattr(predictor, "workers", 1) != 1
+    driver = SearchDriver(predictor, len(states))
+    outputs = [None] * len(states)
     try:
-        if pooled:
-            if predictor._runtime is None:
-                predictor._runtime = SearchRuntime(predictor.workers)
-            batch = predictor._runtime
-            batch.start(states, noise, simulations, candidates, effects=effects, max_nodes=max_nodes)
-        else:
-            batch = SearchBatch(states, noise, simulations, candidates, effects=effects, max_nodes=max_nodes)
-        request = batch.advance(stop=stop() or time.monotonic() >= deadline)
-        while request is not None:
-            request_id, boards, actions, lengths, tokens = request
-            if hasattr(predictor, "with_effects"):
-                logits, values = predictor.packed(boards, actions, lengths=lengths, effects=tokens)
-            else:  # simple framework-independent predictors remain valid
-                logits, values = predictor.packed(boards, actions)
-            request = batch.advance(request_id, logits, values,
-                                    stop=stop() or time.monotonic() >= deadline)
-        predictor.native_seconds += batch.native_seconds
-        predictor.search_calls += batch.ffi_calls
-        predictor.last_search_metrics = batch.metrics()
-        return [SearchResult(move, root, policy, visits, nodes, raw, chosen)
-                for root, (move, policy, visits, nodes, raw, chosen)
-                in zip(roots, batch.finish(), strict=True)]
+        for lane, start in enumerate(range(0, len(states), driver.group_size)):
+            driver.start(lane, states[start:start + driver.group_size], rng, simulations, candidates, explore, max_nodes)
+        while driver.roots:
+            if stop() or time.monotonic() >= deadline: driver.runtime.stop()
+            for lane, results in driver.poll():
+                start = lane * driver.group_size
+                outputs[start:start + len(results)] = results
+        driver.finish()
+        return outputs
     except BaseException:
-        if pooled and predictor._runtime is not None:
-            predictor._runtime.close()
-            predictor._runtime = None
+        driver.abort()
         raise

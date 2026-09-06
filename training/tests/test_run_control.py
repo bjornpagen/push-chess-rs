@@ -52,7 +52,7 @@ def test_interrupted_updates_resume_before_new_games(tmp_path, monkeypatch):
         state = State()
         board, ids, actions = state.observation()
         sample = Sample(board, ids, actions, np.full(len(ids), 1/len(ids), np.float32),
-                        np.array([0,1,0], np.float32), 1, state.fen(), [])
+                        np.array([0,1,0], np.float32), 1, state.fen(), [], provenance={"board_density": 32})
         return [sample], [{"white_outcome": 0, "truncated": False}]
 
     @contextmanager
@@ -61,10 +61,11 @@ def test_interrupted_updates_resume_before_new_games(tmp_path, monkeypatch):
 
     for name, replacement in {"Network": FakeModel, "Learner": FakeLearner,
             "Predictor": FakePredictor, "save_checkpoint": save, "load_checkpoint": load,
-            "collect": collect, "stop_signals": signals,
+            "stop_signals": signals,
             "Tensor": SimpleNamespace(manual_seed=lambda _seed: None),
             "Device": SimpleNamespace(DEFAULT="TEST_DOUBLE")}.items():
         monkeypatch.setattr(run, name, replacement)
+    monkeypatch.setattr(run.RollingCollector, "collect", collect)
     config = run.TrainConfig(channels=8,blocks=1,actors=1,games=1,simulations=1,
                              fast_simulations=1,batch_size=1,reuse=3)
     first = run.train(tmp_path, config, minutes=1, iterations=1)

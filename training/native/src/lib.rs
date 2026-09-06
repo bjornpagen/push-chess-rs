@@ -43,6 +43,10 @@ type DetailedRow<'py> = (
     f32,
     f32,
 );
+type RuntimePoll<'py> = (
+    Option<EvaluationRequest<'py>>,
+    Vec<(usize, Vec<DetailedRow<'py>>)>,
+);
 
 fn detailed_results<'py>(
     py: Python<'py>,
@@ -343,10 +347,10 @@ struct SearchRuntime {
 #[pymethods]
 impl SearchRuntime {
     #[new]
-    #[pyo3(signature = (workers=0, coalesce_us=100))]
-    fn new(py: Python<'_>, workers: usize, coalesce_us: u64) -> PyResult<Self> {
+    #[pyo3(signature = (workers, lanes, batch_rows))]
+    fn new(py: Python<'_>, workers: usize, lanes: usize, batch_rows: usize) -> PyResult<Self> {
         let inner = py
-            .detach(|| selfplay::SearchRuntime::new(workers, coalesce_us))
+            .detach(|| selfplay::SearchRuntime::new(workers, lanes, batch_rows))
             .map_err(PyValueError::new_err)?;
         Ok(Self {
             inner: std::sync::Mutex::new(inner),
@@ -355,11 +359,12 @@ impl SearchRuntime {
         })
     }
 
-    #[pyo3(signature = (states, noise, simulations, candidates, effects=false, max_nodes=16384))]
+    #[pyo3(signature = (lane, states, noise, simulations, candidates, effects=false, max_nodes=16384))]
     #[allow(clippy::too_many_arguments)] // Explicit bulk Python boundary, including hidden Python token.
     fn start(
         &mut self,
         py: Python<'_>,
+        lane: usize,
         states: Vec<PyRef<'_, State>>,
         noise: PyReadonlyArray2<'_, f32>,
         simulations: usize,
@@ -390,6 +395,7 @@ impl SearchRuntime {
             .map_err(|_| PyValueError::new_err("runtime poisoned"))?;
         py.detach(|| {
             inner.start(
+                lane,
                 roots,
                 noises,
                 simulations,
@@ -401,84 +407,96 @@ impl SearchRuntime {
             )
         })
         .map_err(PyValueError::new_err)?;
-        self.native_seconds = 0.0;
-        self.ffi_calls = 0;
         Ok(())
     }
 
-    #[pyo3(signature = (reply_id=None, logits=None, values=None, stop=false))]
-    fn advance<'py>(
+    fn submit(
         &mut self,
-        py: Python<'py>,
-        reply_id: Option<u64>,
-        logits: Option<PyReadonlyArray2<'_, f32>>,
-        values: Option<PyReadonlyArray1<'_, f32>>,
-        stop: bool,
-    ) -> PyResult<Option<EvaluationRequest<'py>>> {
+        reply_id: u64,
+        logits: PyReadonlyArray2<'_, f32>,
+        values: PyReadonlyArray1<'_, f32>,
+    ) -> PyResult<()> {
         let start = Instant::now();
         let inner = self
             .inner
             .get_mut()
             .map_err(|_| PyValueError::new_err("runtime poisoned"))?;
-        // Publish stop before replies let workers resume their traversal.
-        if stop {
-            inner.stop();
+        if logits.shape()[0] != values.shape()[0] {
+            return Err(PyValueError::new_err("reply row mismatch"));
         }
-        match (reply_id, logits, values) {
-            (Some(id), Some(logits), Some(values)) => {
-                if logits.shape()[0] != values.shape()[0] {
-                    return Err(PyValueError::new_err("reply row mismatch"));
-                }
-                inner
-                    .submit(
-                        id,
-                        logits.as_slice()?,
-                        values.as_slice()?,
-                        logits.shape()[1],
-                    )
-                    .map_err(PyValueError::new_err)?;
-            }
-            (None, None, None) => {}
-            _ => {
-                return Err(PyValueError::new_err(
-                    "reply ID, logits and values must be provided together",
-                ));
-            }
-        }
-        let result = py
-            .detach(|| inner.request())
+        inner
+            .submit(
+                reply_id,
+                logits.as_slice()?,
+                values.as_slice()?,
+                logits.shape()[1],
+            )
             .map_err(PyValueError::new_err)?;
         self.native_seconds += start.elapsed().as_secs_f64();
         self.ffi_calls += 1;
-        Ok(result.map(|(id, f)| evaluation_request(py, id, f)))
+        Ok(())
     }
 
-    fn finish<'py>(&mut self, py: Python<'py>) -> PyResult<Vec<DetailedRow<'py>>> {
+    #[pyo3(signature = (wait_us=1000))]
+    fn poll<'py>(&mut self, py: Python<'py>, wait_us: u64) -> PyResult<RuntimePoll<'py>> {
+        let start = Instant::now();
         let inner = self
             .inner
             .get_mut()
             .map_err(|_| PyValueError::new_err("runtime poisoned"))?;
-        Ok(detailed_results(
-            py,
-            inner
-                .results()
-                .map_err(PyValueError::new_err)?
+        let result = py
+            .detach(|| inner.poll(wait_us))
+            .map_err(PyValueError::new_err)?;
+        self.native_seconds += start.elapsed().as_secs_f64();
+        self.ffi_calls += 1;
+        Ok((
+            result.request.map(|(id, f)| evaluation_request(py, id, f)),
+            result
+                .completed
                 .into_iter()
-                .cloned(),
+                .map(|c| (c.lane, detailed_results(py, c.results)))
+                .collect(),
         ))
     }
 
-    fn metrics(&mut self) -> PyResult<std::collections::BTreeMap<&'static str, usize>> {
+    #[getter]
+    fn idle(&mut self) -> PyResult<bool> {
+        Ok(self
+            .inner
+            .get_mut()
+            .map_err(|_| PyValueError::new_err("runtime poisoned"))?
+            .idle())
+    }
+
+    fn stop(&mut self) -> PyResult<()> {
+        self.inner
+            .get_mut()
+            .map_err(|_| PyValueError::new_err("runtime poisoned"))?
+            .stop();
+        Ok(())
+    }
+
+    #[getter]
+    fn lane_count(&mut self) -> PyResult<usize> {
+        Ok(self
+            .inner
+            .get_mut()
+            .map_err(|_| PyValueError::new_err("runtime poisoned"))?
+            .lane_count())
+    }
+
+    fn metrics(&mut self) -> PyResult<std::collections::BTreeMap<&'static str, f64>> {
         let m = self
             .inner
             .get_mut()
             .map_err(|_| PyValueError::new_err("runtime poisoned"))?
             .metrics();
         Ok(std::collections::BTreeMap::from([
-            ("nodes", m.nodes),
-            ("edges", m.edges),
-            ("arena_bytes", m.arena_bytes),
-            ("neural_rounds", m.neural_rounds as usize),
+            ("batches", m.batches as f64),
+            ("rows", m.rows as f64),
+            ("arena_bytes_peak", m.arena_bytes as f64),
+            ("completed_search_groups", m.completed as f64),
+            ("worker_seconds", m.worker_seconds),
         ]))
     }
 

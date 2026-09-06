@@ -31,6 +31,16 @@ def main(argv=None):
                           ("actors", 32), ("workers", 1), ("cache-mb", 0), ("repeats", 10), ("search-simulations", 0)):
         profile.add_argument("--" + name, type=int, default=default)
     profile.add_argument("--output", type=Path, required=True)
+    throughput = sub.add_parser("throughput", help="frozen-weight rolling self-play sweep, no training")
+    throughput.add_argument("checkpoint", type=Path)
+    throughput.add_argument("--settings", nargs="+", default=["32:32", "64:32", "128:32", "128:64", "256:64", "256:128"],
+                            help="actor:inference-batch pairs")
+    throughput.add_argument("--workers", type=int, default=2)
+    throughput.add_argument("--group-size", type=int, default=16)
+    throughput.add_argument("--repeats", type=int, default=2)
+    throughput.add_argument("--seconds", type=float, default=15.)
+    throughput.add_argument("--warmup", type=float, default=10.)
+    throughput.add_argument("--output", type=Path, required=True)
     sub.add_parser("plan", help="write an experiment manifest without compute (use plan --output PATH)")
     training = sub.add_parser("train", help="start or resume a bounded self-play run")
     training.add_argument("--run", type=Path, required=True)
@@ -65,8 +75,21 @@ def main(argv=None):
     if Device.DEFAULT != "METAL" and not (args.allow_cpu and Device.DEFAULT == "CPU"):
         parser.error(f"expected METAL, got {Device.DEFAULT}; CPU diagnostics require DEV=CPU and --allow-cpu")
     if args.command == "train":
-        config = TrainConfig(**{f.name: getattr(args, f.name) for f in fields(defaults)})
-        train(args.run, config, args.minutes, args.iterations, args.resume, not args.no_jit)
+        config = defaults if args.resume else TrainConfig(**{f.name: getattr(args, f.name) for f in fields(defaults)})
+        overrides = {f.name: getattr(args, f.name) for f in fields(defaults)
+                     if any(a.split("=")[0] in ("--" + f.name.replace("_", "-"), "--no-" + f.name.replace("_", "-"))
+                            for a in argv)} if args.resume else None
+        train(args.run, config, args.minutes, args.iterations, args.resume, not args.no_jit, system_overrides=overrides)
+    elif args.command == "throughput":
+        from .throughput import sweep
+        from .learning import write_json
+        if args.output.exists(): raise FileExistsError(args.output)
+        settings = [tuple(map(int, pair.split(":"))) for pair in args.settings]
+        if any(len(pair) != 2 or min(pair) < 1 for pair in settings): parser.error("expected positive actors:batch pairs")
+        result = sweep(args.checkpoint, settings, repeats=args.repeats, seconds=args.seconds, warmup=args.warmup,
+                       workers=args.workers, group_size=args.group_size, progress=lambda row: print(row, flush=True))
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        write_json(args.output, result)
     elif args.command == "profile":
         from .benchmark import probe
         from .learning import write_json

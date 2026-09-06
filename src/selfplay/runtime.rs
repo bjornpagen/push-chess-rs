@@ -1,14 +1,13 @@
-//! Coarse native actor pool. No Python callbacks, per-edge atomics, or spinning.
-//! Workers retain private arenas. The coordinator serves whichever workers are
-//! ready, with a bounded coalescing delay instead of a slowest-worker barrier.
+//! Independent search lanes, a bounded CPU queue, and owned inference leases.
+//! A lane is a small group of trees, not a thread and not a device batch.
 use super::{
     ACTION_FIELDS, BOARD_FLOATS, BatchSearch, EFFECT_FIELDS, Features, SearchMetrics,
     SearchOptions, SearchResult, SearchRoot,
 };
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -16,8 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-enum Job {
+enum Work {
     Start {
+        retained: Option<Box<BatchSearch>>,
         roots: Vec<SearchRoot>,
         noise: Vec<Vec<f32>>,
         simulations: usize,
@@ -25,198 +25,257 @@ enum Job {
         options: SearchOptions,
     },
     Reply {
+        search: Box<BatchSearch>,
         id: u64,
         logits: Vec<f32>,
         values: Vec<f32>,
         width: usize,
     },
-    Shutdown,
+}
+struct Task {
+    lane: usize,
+    work: Work,
 }
 enum Event {
     Ready {
-        worker: usize,
-        id: u64,
+        lane: usize,
+        search: Box<BatchSearch>,
         features: Features,
+        seconds: f64,
     },
     Done {
-        worker: usize,
-        results: Vec<SearchResult>,
-        metrics: SearchMetrics,
+        lane: usize,
+        search: Box<BatchSearch>,
+        seconds: f64,
     },
     Failed(&'static str),
 }
-
-fn worker_loop(
-    worker: usize,
-    jobs: mpsc::Receiver<Job>,
-    ready: mpsc::Sender<Event>,
-    cancel: Arc<AtomicBool>,
-) {
-    let mut search: Option<BatchSearch> = None;
-    while let Ok(job) = jobs.recv() {
-        let changed = match job {
-            Job::Shutdown => break,
-            Job::Start {
-                roots,
-                noise,
-                simulations,
-                candidates,
-                options,
-            } => {
-                if let Some(search) = &mut search {
-                    search.restart(roots, noise, simulations, candidates, options)
-                } else {
-                    BatchSearch::with_options(roots, noise, simulations, candidates, options).map(
-                        |mut s| {
-                            s.set_cancellation(cancel.clone());
-                            search = Some(s);
-                        },
-                    )
-                }
-            }
-            Job::Reply {
-                id,
-                logits,
-                values,
-                width,
-            } => search
-                .as_mut()
-                .ok_or("worker has no search")
-                .and_then(|s| s.submit_for(id, &logits, &values, width)),
-        };
-        let result = changed.and_then(|()| {
-            let search = search.as_mut().ok_or("worker has no search")?;
-            match search.request()? {
-                Some(features) => Ok(Event::Ready {
-                    worker,
-                    id: search.request_id().expect("pending"),
-                    features,
-                }),
-                None => Ok(Event::Done {
-                    worker,
-                    results: search.results()?,
-                    metrics: search.metrics(),
-                }),
-            }
-        });
-        match result {
-            Ok(event) => {
-                if ready.send(event).is_err() {
-                    break;
-                }
-            }
-            Err(error) => {
-                let _ = ready.send(Event::Failed(error));
-                break;
-            }
-        }
-    }
+struct Ready {
+    search: Box<BatchSearch>,
+    features: Features,
 }
-
-struct Pending {
-    worker: usize,
-    id: u64,
+enum Lane {
+    Idle(Option<Box<BatchSearch>>),
+    Working,
+    Ready(Ready),
+    Leased(Box<BatchSearch>),
+}
+struct Route {
+    lane: usize,
     start: usize,
     rows: usize,
 }
+struct Lease {
+    routes: Vec<Route>,
+    lengths: Vec<i32>,
+}
 
+pub struct Completion {
+    pub lane: usize,
+    pub results: Vec<SearchResult>,
+    pub metrics: SearchMetrics,
+}
+#[derive(Default)]
+pub struct RuntimeMetrics {
+    pub batches: usize,
+    pub rows: usize,
+    pub completed: usize,
+    pub worker_seconds: f64,
+    pub arena_bytes: usize,
+}
+pub struct Poll {
+    pub request: Option<(u64, Features)>,
+    pub completed: Vec<Completion>,
+}
+
+fn execute(
+    work: Work,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(Box<BatchSearch>, Option<Features>), &'static str> {
+    let mut search = match work {
+        Work::Start {
+            retained,
+            roots,
+            noise,
+            simulations,
+            candidates,
+            options,
+        } => {
+            if let Some(mut search) = retained {
+                search.restart(roots, noise, simulations, candidates, options)?;
+                search
+            } else {
+                let mut search = Box::new(BatchSearch::with_options(
+                    roots,
+                    noise,
+                    simulations,
+                    candidates,
+                    options,
+                )?);
+                search.set_cancellation(cancel.clone());
+                search
+            }
+        }
+        Work::Reply {
+            mut search,
+            id,
+            logits,
+            values,
+            width,
+        } => {
+            search.submit_for(id, &logits, &values, width)?;
+            search
+        }
+    };
+    let features = search.request()?;
+    Ok((search, features))
+}
+
+/// Ownership crosses threads only in coarse jobs. The queue has at most one job
+/// per lane; ready and leased lanes cannot also be running.
 pub struct SearchRuntime {
-    ports: Vec<mpsc::SyncSender<Job>>,
+    sender: Option<mpsc::SyncSender<Task>>,
     threads: Vec<JoinHandle<()>>,
     inbox: mpsc::Receiver<Event>,
     cancel: Arc<AtomicBool>,
-    ready: VecDeque<(usize, u64, Features)>,
-    pending: Vec<Pending>,
-    pending_lengths: Vec<i32>,
-    lane_map: Vec<Vec<usize>>,
-    results: Vec<Option<SearchResult>>,
-    active: usize,
-    completed: usize,
-    epoch: u64,
-    awaiting: bool,
+    lanes: Vec<Lane>,
+    ready: VecDeque<usize>,
+    leases: BTreeMap<u64, Lease>,
+    batch_rows: usize,
     failed: bool,
-    metrics: SearchMetrics,
-    coalesce: Duration,
+    metrics: RuntimeMetrics,
+    arena_sizes: Vec<usize>,
 }
 
 impl SearchRuntime {
-    /// Zero chooses available parallelism. This does not promise core affinity.
-    pub fn new(workers: usize, coalesce_us: u64) -> Result<Self, &'static str> {
+    /// Zero workers means available parallelism, not a core-affinity guarantee.
+    pub fn new(workers: usize, lanes: usize, batch_rows: usize) -> Result<Self, &'static str> {
         let count = if workers == 0 {
             thread::available_parallelism().map_or(1, usize::from)
         } else {
             workers
         };
-        if count > 256 || coalesce_us > 100_000 {
-            return Err("invalid worker/coalescing budget");
+        if count > 256 || lanes == 0 || lanes > 4096 || batch_rows == 0 || batch_rows > 4096 {
+            return Err("invalid worker/lane/batch capacity");
         }
-        let (sender, inbox) = mpsc::channel();
+        let (sender, jobs) = mpsc::sync_channel::<Task>(lanes);
+        let jobs = Arc::new(Mutex::new(jobs));
+        let (events, inbox) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let mut ports: Vec<mpsc::SyncSender<Job>> = Vec::with_capacity(count);
-        let mut threads: Vec<JoinHandle<()>> = Vec::with_capacity(count);
-        for i in 0..count {
-            let (tx, rx) = mpsc::sync_channel(1);
-            let ready = sender.clone();
+        let mut threads = Vec::new();
+        for i in 0..count.min(lanes) {
+            let jobs = jobs.clone();
+            let events = events.clone();
             let flag = cancel.clone();
-            let failure = sender.clone();
             let handle = thread::Builder::new()
                 .name(format!("pushzero-{i}"))
                 .spawn(move || {
-                    // A panic must wake the coordinator, not leave it waiting forever.
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        worker_loop(i, rx, ready, flag)
+                        loop {
+                            // The receiver lock protects dequeue only, never tree work.
+                            let task = match jobs.lock().expect("job queue poisoned").recv() {
+                                Ok(task) => task,
+                                Err(_) => break,
+                            };
+                            let begin = Instant::now();
+                            let event = match execute(task.work, &flag) {
+                                Ok((search, Some(features))) => Event::Ready {
+                                    lane: task.lane,
+                                    search,
+                                    features,
+                                    seconds: begin.elapsed().as_secs_f64(),
+                                },
+                                Ok((search, None)) => Event::Done {
+                                    lane: task.lane,
+                                    search,
+                                    seconds: begin.elapsed().as_secs_f64(),
+                                },
+                                Err(error) => Event::Failed(error),
+                            };
+                            let failed = matches!(event, Event::Failed(_));
+                            if events.send(event).is_err() || failed {
+                                break;
+                            }
+                        }
                     }));
                     if result.is_err() {
-                        let _ = failure.send(Event::Failed("search worker panicked"));
+                        let _ = events.send(Event::Failed("search worker panicked"));
                     }
                 });
-            let handle = match handle {
-                Ok(handle) => handle,
+            match handle {
+                Ok(handle) => threads.push(handle),
                 Err(_) => {
-                    for port in ports {
-                        let _ = port.send(Job::Shutdown);
-                    }
-                    for worker in threads {
-                        let _ = worker.join();
+                    drop(sender);
+                    for handle in threads {
+                        let _ = handle.join();
                     }
                     return Err("could not create search worker");
                 }
-            };
-            ports.push(tx);
-            threads.push(handle);
+            }
         }
         Ok(Self {
-            ports,
+            sender: Some(sender),
             threads,
             inbox,
             cancel,
+            lanes: (0..lanes).map(|_| Lane::Idle(None)).collect(),
             ready: VecDeque::new(),
-            pending: Vec::new(),
-            pending_lengths: Vec::new(),
-            lane_map: Vec::new(),
-            results: Vec::new(),
-            active: 0,
-            completed: 0,
-            epoch: 0,
-            awaiting: false,
+            leases: BTreeMap::new(),
+            batch_rows,
             failed: false,
-            metrics: SearchMetrics::default(),
-            coalesce: Duration::from_micros(coalesce_us),
+            metrics: RuntimeMetrics::default(),
+            arena_sizes: vec![0; lanes],
         })
+    }
+
+    fn check_open(&self) -> Result<(), &'static str> {
+        if self.failed || self.sender.is_none() {
+            Err("runtime closed or failed")
+        } else {
+            Ok(())
+        }
+    }
+    pub fn idle(&self) -> bool {
+        self.lanes.iter().all(|s| matches!(s, Lane::Idle(_)))
+    }
+    pub fn lane_count(&self) -> usize {
+        self.lanes.len()
+    }
+    pub fn metrics(&self) -> &RuntimeMetrics {
+        &self.metrics
+    }
+
+    fn schedule(&mut self, lane: usize, work: Work) -> Result<(), &'static str> {
+        // At most one queued/running task per lane: this bounded send cannot
+        // wait for an inference reply or deadlock on a full job queue.
+        if self
+            .sender
+            .as_ref()
+            .ok_or("runtime closed")?
+            .send(Task { lane, work })
+            .is_err()
+        {
+            self.failed = true;
+            return Err("search workers disconnected");
+        }
+        Ok(())
     }
 
     pub fn start(
         &mut self,
+        lane: usize,
         roots: Vec<SearchRoot>,
         noise: Vec<Vec<f32>>,
         simulations: usize,
         candidates: usize,
         options: SearchOptions,
     ) -> Result<(), &'static str> {
-        if self.failed || self.ports.is_empty() || self.awaiting || self.completed != self.active {
-            return Err("runtime closed, failed or busy");
+        self.check_open()?;
+        if lane >= self.lanes.len() || !matches!(self.lanes[lane], Lane::Idle(_)) {
+            return Err("search lane is not idle");
         }
         if roots.is_empty()
+            || roots.len() > self.batch_rows
             || roots.len() != noise.len()
             || simulations == 0
             || simulations > 1_000_000
@@ -229,39 +288,221 @@ impl SearchRuntime {
                     || n.iter().any(|x| !x.is_finite())
             })
         {
-            return Err("invalid runtime roots, noise or budget");
+            return Err("invalid search roots, noise, or capacity");
         }
-        self.active = roots.len().min(self.ports.len());
-        self.completed = 0;
-        self.ready.clear();
-        self.pending.clear();
-        self.pending_lengths.clear();
-        self.metrics = SearchMetrics::default();
-        self.cancel.store(false, Ordering::Relaxed);
-        self.results = (0..roots.len()).map(|_| None).collect();
-        self.lane_map = (0..self.active).map(|_| Vec::new()).collect();
-        let mut groups: Vec<(Vec<SearchRoot>, Vec<Vec<f32>>)> =
-            (0..self.active).map(|_| (Vec::new(), Vec::new())).collect();
-        for (i, (root, noise)) in roots.into_iter().zip(noise).enumerate() {
-            let worker = i % self.active;
-            self.lane_map[worker].push(i);
-            groups[worker].0.push(root);
-            groups[worker].1.push(noise);
+        if self.idle() {
+            self.cancel.store(false, Ordering::Relaxed);
         }
-        for (worker, (roots, noise)) in groups.into_iter().enumerate() {
-            if self.ports[worker]
-                .send(Job::Start {
-                    roots,
-                    noise,
-                    simulations,
-                    candidates,
-                    options,
-                })
-                .is_err()
-            {
-                self.failed = true;
-                return Err("search worker disconnected");
+        let Lane::Idle(retained) = std::mem::replace(&mut self.lanes[lane], Lane::Working) else {
+            unreachable!()
+        };
+        self.schedule(
+            lane,
+            Work::Start {
+                retained,
+                roots,
+                noise,
+                simulations,
+                candidates,
+                options,
+            },
+        )
+    }
+
+    fn accept(
+        &mut self,
+        event: Event,
+        completed: &mut Vec<Completion>,
+    ) -> Result<(), &'static str> {
+        match event {
+            Event::Ready {
+                lane,
+                search,
+                features,
+                seconds,
+            } => {
+                if !matches!(self.lanes[lane], Lane::Working) {
+                    return Err("invalid ready lane transition");
+                }
+                self.metrics.worker_seconds += seconds;
+                self.lanes[lane] = Lane::Ready(Ready { search, features });
+                self.ready.push_back(lane);
             }
+            Event::Done {
+                lane,
+                search,
+                seconds,
+            } => {
+                if !matches!(self.lanes[lane], Lane::Working) {
+                    return Err("invalid done lane transition");
+                }
+                self.metrics.worker_seconds += seconds;
+                let metrics = search.metrics();
+                self.arena_sizes[lane] = metrics.arena_bytes;
+                self.metrics.arena_bytes =
+                    self.metrics.arena_bytes.max(self.arena_sizes.iter().sum());
+                completed.push(Completion {
+                    lane,
+                    results: search.results()?,
+                    metrics,
+                });
+                self.lanes[lane] = Lane::Idle(Some(search));
+                self.metrics.completed += 1;
+            }
+            Event::Failed(error) => {
+                self.failed = true;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Lease at most one device batch. Other independent leases may remain in
+    /// flight, and replies may arrive in any order. Empty polls are not EOF.
+    pub fn poll(&mut self, wait_us: u64) -> Result<Poll, &'static str> {
+        self.check_open()?;
+        if wait_us > 1_000_000 {
+            return Err("poll wait exceeds one second");
+        }
+        let mut completed = Vec::new();
+        while let Ok(event) = self.inbox.try_recv() {
+            self.accept(event, &mut completed)?;
+        }
+        if self.ready.is_empty() && completed.is_empty() && !self.idle() && wait_us > 0 {
+            match self.inbox.recv_timeout(Duration::from_micros(wait_us)) {
+                Ok(event) => self.accept(event, &mut completed)?,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(_) => {
+                    self.failed = true;
+                    return Err("all search workers disconnected");
+                }
+            }
+            while let Ok(event) = self.inbox.try_recv() {
+                self.accept(event, &mut completed)?;
+            }
+        }
+        let mut selected = Vec::new();
+        let mut rows = 0;
+        while let Some(&lane) = self.ready.front() {
+            let Lane::Ready(r) = &self.lanes[lane] else {
+                unreachable!()
+            };
+            if rows + r.features.rows > self.batch_rows {
+                break;
+            }
+            rows += r.features.rows;
+            self.ready.pop_front();
+            let Lane::Ready(r) = std::mem::replace(&mut self.lanes[lane], Lane::Working) else {
+                unreachable!()
+            };
+            self.lanes[lane] = Lane::Leased(r.search);
+            selected.push((lane, r.features));
+        }
+        if selected.is_empty() {
+            return Ok(Poll {
+                request: None,
+                completed,
+            });
+        }
+        let mut routes = Vec::with_capacity(selected.len());
+        let output = if selected.len() == 1 {
+            let (lane, features) = selected.pop().expect("one selected");
+            routes.push(Route {
+                lane,
+                start: 0,
+                rows,
+            });
+            features
+        } else {
+            let width = selected.iter().map(|(_, f)| f.width).max().unwrap();
+            let effect_width = selected.iter().map(|(_, f)| f.effect_width).max().unwrap();
+            let mut out = Features::empty(rows, width);
+            out.effect_width = effect_width;
+            out.effects.resize(rows * effect_width * EFFECT_FIELDS, 0);
+            let mut start = 0;
+            for (lane, f) in selected {
+                out.boards[start * BOARD_FLOATS..(start + f.rows) * BOARD_FLOATS]
+                    .copy_from_slice(&f.boards);
+                out.lengths[start..start + f.rows].copy_from_slice(&f.lengths);
+                for row in 0..f.rows {
+                    let dst = (start + row) * width * ACTION_FIELDS;
+                    let src = row * f.width * ACTION_FIELDS;
+                    out.actions[dst..dst + f.width * ACTION_FIELDS]
+                        .copy_from_slice(&f.actions[src..src + f.width * ACTION_FIELDS]);
+                    let dst = (start + row) * effect_width * EFFECT_FIELDS;
+                    let src = row * f.effect_width * EFFECT_FIELDS;
+                    out.effects[dst..dst + f.effect_width * EFFECT_FIELDS]
+                        .copy_from_slice(&f.effects[src..src + f.effect_width * EFFECT_FIELDS]);
+                }
+                routes.push(Route {
+                    lane,
+                    start,
+                    rows: f.rows,
+                });
+                start += f.rows;
+            }
+            out
+        };
+        let id = super::search::next_request_id()?;
+        self.leases.insert(
+            id,
+            Lease {
+                routes,
+                lengths: output.lengths.clone(),
+            },
+        );
+        self.metrics.batches += 1;
+        self.metrics.rows += rows;
+        Ok(Poll {
+            request: Some((id, output)),
+            completed,
+        })
+    }
+
+    pub fn submit(
+        &mut self,
+        id: u64,
+        logits: &[f32],
+        values: &[f32],
+        width: usize,
+    ) -> Result<(), &'static str> {
+        self.check_open()?;
+        let lease = self
+            .leases
+            .get(&id)
+            .ok_or("unknown or already consumed inference lease")?;
+        if values.len() != lease.lengths.len()
+            || values.len().checked_mul(width) != Some(logits.len())
+            || values.iter().any(|v| !v.is_finite() || v.abs() > 1.00001)
+            || lease.lengths.iter().enumerate().any(|(i, &n)| {
+                n as usize > width
+                    || logits[i * width..i * width + n as usize]
+                        .iter()
+                        .any(|v| !v.is_finite())
+            })
+        {
+            return Err("invalid inference reply");
+        }
+        // Atomic boundary validation is complete before any worker is released.
+        let lease = self.leases.remove(&id).expect("validated lease");
+        for route in lease.routes {
+            let Lane::Leased(search) =
+                std::mem::replace(&mut self.lanes[route.lane], Lane::Working)
+            else {
+                unreachable!()
+            };
+            let id = search.request_id().expect("leased search");
+            self.schedule(
+                route.lane,
+                Work::Reply {
+                    search,
+                    id,
+                    logits: logits[route.start * width..(route.start + route.rows) * width]
+                        .to_vec(),
+                    values: values[route.start..route.start + route.rows].to_vec(),
+                    width,
+                },
+            )?;
         }
         Ok(())
     }
@@ -270,189 +511,18 @@ impl SearchRuntime {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
-    fn accept(&mut self, event: Event) -> Result<(), &'static str> {
-        match event {
-            Event::Ready {
-                worker,
-                id,
-                features,
-            } => self.ready.push_back((worker, id, features)),
-            Event::Done {
-                worker,
-                results,
-                metrics,
-            } => {
-                if results.len() != self.lane_map[worker].len() {
-                    self.failed = true;
-                    return Err("worker result shape mismatch");
-                }
-                for (&lane, result) in self.lane_map[worker].iter().zip(results) {
-                    self.results[lane] = Some(result);
-                }
-                self.completed += 1;
-                self.metrics.nodes += metrics.nodes;
-                self.metrics.edges += metrics.edges;
-                self.metrics.arena_bytes += metrics.arena_bytes;
-                self.metrics.neural_rounds += metrics.neural_rounds;
-            }
-            Event::Failed(error) => {
-                self.failed = true;
-                self.stop();
-                return Err(error);
-            }
-        }
-        Ok(())
-    }
-
-    pub fn request(&mut self) -> Result<Option<(u64, Features)>, &'static str> {
-        if self.failed {
-            return Err("runtime failed; close it");
-        }
-        if self.awaiting {
-            return Err("submit the pending runtime batch first");
-        }
-        while self.ready.is_empty() && self.completed < self.active {
-            let event = self.inbox.recv().map_err(|_| "all workers disconnected")?;
-            self.accept(event)?;
-        }
-        if self.ready.is_empty() {
-            return Ok(None);
-        }
-        let start = Instant::now();
-        while self.ready.len() + self.completed < self.active {
-            let elapsed = start.elapsed();
-            if elapsed >= self.coalesce {
-                break;
-            }
-            match self.inbox.recv_timeout(self.coalesce - elapsed) {
-                Ok(event) => self.accept(event)?,
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-                Err(_) => return Err("all workers disconnected"),
-            }
-        }
-        self.pending.clear();
-        if self.ready.len() == 1 {
-            let (worker, id, features) = self.ready.pop_front().expect("one ready worker");
-            self.pending.push(Pending {
-                worker,
-                id,
-                start: 0,
-                rows: features.rows,
-            });
-            return self.publish(features).map(Some);
-        }
-        let rows = self.ready.iter().map(|(_, _, f)| f.rows).sum();
-        let width = self.ready.iter().map(|(_, _, f)| f.width).max().unwrap();
-        let effect_width = self
-            .ready
-            .iter()
-            .map(|(_, _, f)| f.effect_width)
-            .max()
-            .unwrap();
-        let mut output = Features::empty(rows, width);
-        output.effect_width = effect_width;
-        output
-            .effects
-            .resize(rows * effect_width * EFFECT_FIELDS, 0);
-        let mut start = 0;
-        while let Some((worker, id, f)) = self.ready.pop_front() {
-            output.boards[start * BOARD_FLOATS..(start + f.rows) * BOARD_FLOATS]
-                .copy_from_slice(&f.boards);
-            output.lengths[start..start + f.rows].copy_from_slice(&f.lengths);
-            for row in 0..f.rows {
-                let dst = (start + row) * width * ACTION_FIELDS;
-                let src = row * f.width * ACTION_FIELDS;
-                output.actions[dst..dst + f.width * ACTION_FIELDS]
-                    .copy_from_slice(&f.actions[src..src + f.width * ACTION_FIELDS]);
-                let dst = (start + row) * effect_width * EFFECT_FIELDS;
-                let src = row * f.effect_width * EFFECT_FIELDS;
-                output.effects[dst..dst + f.effect_width * EFFECT_FIELDS]
-                    .copy_from_slice(&f.effects[src..src + f.effect_width * EFFECT_FIELDS]);
-            }
-            self.pending.push(Pending {
-                worker,
-                id,
-                start,
-                rows: f.rows,
-            });
-            start += f.rows;
-        }
-        self.publish(output).map(Some)
-    }
-
-    fn publish(&mut self, output: Features) -> Result<(u64, Features), &'static str> {
-        self.pending_lengths.clone_from(&output.lengths);
-        self.epoch = super::search::next_request_id()?;
-        self.awaiting = true;
-        Ok((self.epoch, output))
-    }
-
-    pub fn submit(
-        &mut self,
-        epoch: u64,
-        logits: &[f32],
-        values: &[f32],
-        width: usize,
-    ) -> Result<(), &'static str> {
-        if !self.awaiting || epoch != self.epoch {
-            return Err("stale runtime reply");
-        }
-        if values.len() != self.pending_lengths.len()
-            || values.len().checked_mul(width) != Some(logits.len())
-            || values.iter().any(|v| !v.is_finite() || v.abs() > 1.00001)
-            || self.pending_lengths.iter().enumerate().any(|(i, &n)| {
-                n as usize > width
-                    || logits[i * width..i * width + n as usize]
-                        .iter()
-                        .any(|x| !x.is_finite())
-            })
-        {
-            return Err("invalid runtime reply");
-        }
-        // Worker messages own their memory. No borrowed NumPy slice crosses a
-        // detached thread or survives this call, even if the caller mutates it.
-        for p in &self.pending {
-            let job = Job::Reply {
-                id: p.id,
-                logits: logits[p.start * width..(p.start + p.rows) * width].to_vec(),
-                values: values[p.start..p.start + p.rows].to_vec(),
-                width,
-            };
-            if self.ports[p.worker].send(job).is_err() {
-                self.failed = true;
-                return Err("search worker disconnected");
-            }
-        }
-        self.awaiting = false;
-        Ok(())
-    }
-
-    pub fn results(&self) -> Result<Vec<&SearchResult>, &'static str> {
-        if self.failed || self.awaiting || self.active == 0 || self.completed != self.active {
-            return Err("runtime not finished");
-        }
-        self.results
-            .iter()
-            .map(|r| r.as_ref().ok_or("missing worker result"))
-            .collect()
-    }
-
-    pub fn metrics(&self) -> &SearchMetrics {
-        &self.metrics
-    }
-
     pub fn close(&mut self) {
-        self.stop();
-        for port in self.ports.drain(..) {
-            let _ = port.send(Job::Shutdown);
-        }
+        self.cancel.store(true, Ordering::Relaxed);
+        self.sender.take();
         for worker in self.threads.drain(..) {
             let _ = worker.join();
         }
-        self.failed = true;
+        self.ready.clear();
+        self.leases.clear();
+        self.lanes.clear();
+        while self.inbox.try_recv().is_ok() {}
     }
 }
-
 impl Drop for SearchRuntime {
     fn drop(&mut self) {
         self.close();

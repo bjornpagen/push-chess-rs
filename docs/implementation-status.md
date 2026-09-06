@@ -39,15 +39,21 @@ optimizations or silently enabled by this code-only pass.
   compact history prefix and local cursor; contiguous edge arenas with hot
   visit/value/prior columns and cold moves; reusable selection/generation scratch;
   direct final-buffer encoding. No legal-action truncation.
-- Runtime: generation-checked `advance`, whole-reply validation, cooperative
-  cancellation, persistent worker-owned arenas, bounded worker inboxes, coarse
-  readiness/coalescing, stable lane ordering, explicit all-core capability.
+- Runtime: independently leased ready groups, whole-reply validation, cooperative
+  cancellation, owned reusable arenas, a bounded shared worker queue, and explicit
+  Idle/Working/Ready/Leased states. Device batch size is independent of actor,
+  group, worker, and learner-batch counts. Returning one lease wakes native work
+  while the device services other ready jobs. Explicit all-core capability.
   Workers park; no per-edge atomics, Python callbacks, or busy waiting. A sole
   ready worker transfers its output without a merge copy. Multi-worker replies
   copy into owned messages; no borrowed NumPy pointers escape. `workers=1`
-  remains the serial reference; `0` requests available logical parallelism,
+  uses the same scheduler; `0` requests available logical parallelism,
   not hard core affinity. Python retains the authoritative games; workers own
   detached search lanes, not separate full game histories.
+- Collection: persistent actor slots immediately replace completed games and
+  retain unfinished trajectories across learning. Move-boundary checkpoints
+  include compact, checksummed actor sidecars and per-target weight provenance.
+  Quotas drain in-flight moves, not entire games; time limits invent no outcomes.
 - Data: format-2 ragged legal IDs/policies and shared game+ply records; bounded
   exact-history reconstruction cache; format-1 reader; provenance and checkpoint
   shard checksums. Outcomes stay exact; truncations have no value labels.

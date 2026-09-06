@@ -84,10 +84,21 @@ Gumbel low-budget policy improvement, mixed playout caps, replay, and optional
 reanalysis. It does not claim to implement every post-AlphaGo innovation.
 
 Default self-play uses 64 full simulations, 16 fast simulations, and a 25%
-full-search probability. Training retains full-search positions, with a final
-fallback for games that never got a full search. There are 32 concurrent games,
-64 games per iteration, a 100,000-position replay window, and four sampled
+full-search probability. Training retains full-search positions, plus the final
+searched position of games that never got a full search. There are 32 actor slots,
+a target of 64 completed games per collection, a 100,000-position replay window, and four sampled
 training examples per newly stored position on average.
+
+Actor slots are persistent: completed games are replaced immediately. Collection
+pauses after its quota and drains only the moves already searching; unfinished
+games and their compact targets continue after learning. A quota can overshoot
+by the number of in-flight actors. Targets retain their originating optimizer
+step; a game can span weight revisions, but a search never does.
+
+`--actors`, `--search-group-size`, `--inference-batch-size`, and `--batch-size`
+control independent capacities: games, trees per native job, rows per GPU call,
+and examples per optimizer update. Increasing the game population no longer
+requires lengthening the learning interval or growing the learner minibatch.
 
 The optional sparse-position curriculum (`--curriculum`, default 0.25) samples
 valid boards with both kings and 1–4 additional pieces. It gives an untrained
@@ -122,12 +133,18 @@ host/Metal transfers still exist. Expensive native search releases the GIL;
 submission keeps it while borrowing Python-owned data, avoiding concurrent
 mutable aliases. There are no Python callbacks inside tree traversal.
 
-The new `advance` protocol combines submission and the next request in one
-boundary per neural round, plus the initial request. Replies carry globally
-distinct request IDs, lengths and optional effects; stale/duplicate replies are
-rejected before tree mutation. The older two-call API remains available.
+`SearchRuntime.start(lane, ...)` starts an independent one-move search group;
+`poll()` returns completion packets and an optional inference lease. `submit()`
+returns that lease's results and wakes its CPU work before the next GPU call.
+Ready rows from different jobs share a device batch; other jobs stay queued.
+Replies carry globally distinct IDs and an owned routing table. Stale, duplicate,
+and malformed replies are rejected before any worker is resumed; independent
+leases can be answered in either order. Idle/Working/Ready/Leased lane states
+encode ownership, rather than a collection of flags. All production searches
+use this scheduler, including the one-worker configuration. `BatchSearch` is
+still available as an explicit serial reference, never an automatic fallback.
 Terminal-only rounds need no neural call. Root setup and result packaging happen
-once per search. Native-boundary timers include waiting when workers are enabled;
+once per move. Native-boundary timers include waiting;
 they are not measurements of CPU instructions or device arithmetic.
 
 Before this redesign, the first local measurements were roughly 2,000–3,200 network positions/second
@@ -157,9 +174,9 @@ for game, result in zip(games, results):
     game.play(result.move)  # full Rust history survives the next search
 ```
 
-For another neural runtime, implement `packed(boards, actions)` returning
-contiguous float32 `(logits, values)` arrays, plus the metrics counters used in
-`search.py`. Or use the public `SearchBatch` request/submit interface directly.
+For another neural runtime, use the public `SearchRuntime` start/poll/submit
+interface and return contiguous float32 `(logits, values)` arrays for each lease.
+The native implementation does not call back into Python or require tinygrad.
 Rust never needs to know which framework supplied the evaluations.
 
 ### Checkpoint transactions
@@ -167,6 +184,11 @@ Rust never needs to know which framework supplied the evaluations.
 Every checkpoint contains model weights, Adam moments, learning rate, bias
 correction state, NumPy RNG state, configuration, iteration, and committed replay
 shard names/checksums, optional restart archive, and optional separate EMA state.
+An immutable, checksummed `actors-*.npz` sidecar holds unfinished game histories,
+ragged pending policy targets, predictions, and provenance. It stores no full
+board/action tensors. Restoring reconstructs and validates each target's legal
+identity and player perspective. Missing/corrupt sidecars fail, rather than
+resetting the actor population.
 Checkpoints use safetensors. Replay format 2 stores ragged IDs/targets and one
 game log with per-sample ply references; only selected minibatches reconstruct
 inputs, through a bounded cache. The legacy format-1 reader remains available.
@@ -175,8 +197,11 @@ temporary files and atomic replacement. `latest.json` advances only after a
 checkpoint is complete. Orphaned files from an interrupted iteration are not
 silently consumed on resume. An exclusive run lock rejects a second writer.
 
-Resume restores the **saved configuration**, not new architecture/hyperparameter
-flags supplied on that invocation. `--minutes` and `--iterations` apply to the
+Resume restores the **saved configuration**. Explicit systems flags can override
+actor count, worker count, search-group size, inference-batch size, graph capacity,
+and inference-cache budget. Changing actor count with unfinished saved games is
+rejected; it cannot silently discard those games. Other configuration overrides
+are errors. `--minutes` and `--iterations` apply to the
 new session. Unfinished optimizer updates are checkpointed and completed before
 generating new games. Ctrl-C/SIGTERM requests a graceful stop at the next search/update
 boundary. Hard crashes leave the last committed checkpoint usable. Time limits
@@ -185,8 +210,9 @@ are soft at those boundaries; compilation or a current GPU operation can overrun
 Stopping the process releases the CPU/GPU work; no background monitor or automatic
 restart is installed. Restart only with an explicit `train --resume` invocation.
 
-Games stopped by a time/ply limit are **not draws**. Their policy targets remain
-usable, but their WDL target is zero and value-loss weight is zero. Genuine
+Time limits preserve unfinished games for resume. Games reaching the configured
+ply cap are **not draws**: their policy targets remain usable, but their WDL
+target is zero and value-loss weight is zero. Genuine
 stalemate, repetition, and fifty-move outcomes are draws; mate takes precedence.
 
 An important tinygrad-specific invariant is tested: the inference graph cache
@@ -198,6 +224,21 @@ Run files are under the ignored `experiments/` directory. `status.json` contains
 the last event; `metrics.jsonl` records progression; `initial.json` identifies the
 frozen untrained checkpoint; `latest.json` identifies the newest committed one.
 No training result automatically replaces the deployed Cataclysm network.
+
+### Measure the feeder without training
+
+```sh
+uv run pushzero throughput experiments/my-pushzero \
+  --settings 32:32 64:32 128:64 256:128 --repeats 2 \
+  --output experiments/rolling-throughput.json
+```
+
+Each pair is actors:inference-batch-size. This freezes the checkpoint and makes
+no optimizer updates. It interleaves settings and a separate identity control,
+reports warm-up separately, counts useful evaluated rows/device batch and moves
+per second, and samples whole-machine GPU activity and process RSS. It does not
+equate GPU activity with theoretical FLOPS or prove playing strength. See
+[the representation and invariants](../docs/rolling-selfplay.md).
 
 ## Measure strength, not just loss
 

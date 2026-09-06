@@ -226,37 +226,77 @@ fn persistent_pool_matches_serial_and_restarts_cleanly() {
         BatchSearch::with_options(roots(), noise(), 16, 8, SearchOptions::default()).unwrap();
     finish(&mut serial);
     let reference = serial.results().unwrap();
-    let mut runtime = SearchRuntime::new(2, 0).unwrap();
+    let mut runtime = SearchRuntime::new(2, 2, 1).unwrap();
     for _ in 0..3 {
-        runtime
-            .start(roots(), noise(), 16, 8, SearchOptions::default())
-            .unwrap();
-        while let Some((id, f)) = runtime.request().unwrap() {
-            assert!(
-                runtime
-                    .submit(
-                        id + 1,
-                        &vec![0.; f.rows * f.width],
-                        &vec![0.; f.rows],
-                        f.width
-                    )
-                    .is_err()
-            );
+        for (lane, state) in states.iter().enumerate() {
             runtime
-                .submit(id, &vec![0.; f.rows * f.width], &vec![0.; f.rows], f.width)
+                .start(
+                    lane,
+                    vec![SearchRoot::from_state(state)],
+                    vec![vec![0.; state.legal_moves().len()]],
+                    16,
+                    8,
+                    SearchOptions::default(),
+                )
                 .unwrap();
         }
-        for (a, b) in runtime.results().unwrap().iter().zip(&reference) {
-            assert_eq!(a.mv, b.mv);
-            assert_eq!(a.visits, b.visits);
-            assert_eq!(a.policy, b.policy);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut done = 0;
+        while !runtime.idle() {
+            assert!(std::time::Instant::now() < deadline, "runtime stalled");
+            let poll = runtime.poll(1000).unwrap();
+            if let Some((id, f)) = poll.request {
+                assert!(
+                    runtime
+                        .submit(
+                            u64::MAX,
+                            &vec![0.; f.rows * f.width],
+                            &vec![0.; f.rows],
+                            f.width
+                        )
+                        .is_err()
+                );
+                assert!(
+                    runtime
+                        .submit(
+                            id,
+                            &vec![0.; f.rows * f.width],
+                            &vec![f32::NAN; f.rows],
+                            f.width
+                        )
+                        .is_err()
+                );
+                runtime
+                    .submit(id, &vec![0.; f.rows * f.width], &vec![0.; f.rows], f.width)
+                    .unwrap();
+                assert!(
+                    runtime
+                        .submit(id, &vec![0.; f.rows * f.width], &vec![0.; f.rows], f.width)
+                        .is_err()
+                );
+            }
+            for c in poll.completed {
+                let (a, b) = (&c.results[0], &reference[c.lane]);
+                assert_eq!(a.mv, b.mv);
+                assert_eq!(a.visits, b.visits);
+                assert_eq!(a.policy, b.policy);
+                done += 1;
+            }
         }
+        assert_eq!(done, states.len());
     }
     // Closing with unanswered inference must not wait for a Python reply.
     runtime
-        .start(roots(), noise(), 16, 8, SearchOptions::default())
+        .start(
+            0,
+            vec![SearchRoot::from_state(&states[0])],
+            vec![vec![0.; states[0].legal_moves().len()]],
+            16,
+            8,
+            SearchOptions::default(),
+        )
         .unwrap();
-    assert!(runtime.request().unwrap().is_some());
+    while runtime.poll(1000).unwrap().request.is_none() {}
     runtime.close();
     runtime.close();
 }

@@ -14,9 +14,18 @@ from pushzero.run import TrainConfig, run_lock, train
 
 class ZeroPredictor:
     positions = seconds = native_seconds = search_calls = 0
-    def packed(self, boards, actions):
+    batch_size = 32
+    group_size = 16
+    workers = 1
+    with_effects = False
+    _runtime = None
+    def packed(self, boards, actions, *, lengths=None, effects=None):
         self.positions += len(boards)
         return np.zeros(actions.shape[:2], np.float32), np.zeros(len(boards), np.float32)
+    def close(self):
+        if self._runtime is not None: self._runtime.close()
+        self._runtime = None
+    def __del__(self): self.close()
 
 
 def sample():

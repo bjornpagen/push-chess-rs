@@ -91,13 +91,14 @@ def test_native_advance_owns_output_and_rejects_bad_reply_atomically():
 
 def test_pool_closes_with_unanswered_batch_and_is_idempotent():
     state = State()
-    runtime = SearchRuntime(2, 0)
-    runtime.start([state, state], np.zeros((2, 128), np.float32), 8, 4)
-    request = runtime.advance()
+    runtime = SearchRuntime(2, 2, 2)
+    runtime.start(0, [state, state], np.zeros((2, 128), np.float32), 8, 4)
+    request = None
+    while request is None: request, _ = runtime.poll()
     assert request is not None
     runtime.close()
     runtime.close()
-    with pytest.raises(ValueError): runtime.start([state], np.zeros((1, 128), np.float32), 8, 4)
+    with pytest.raises(ValueError): runtime.start(0, [state], np.zeros((1, 128), np.float32), 8, 4)
 
 
 def test_compact_shards_share_game_logs_and_reconstruct_actual_history(tmp_path):

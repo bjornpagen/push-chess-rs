@@ -25,6 +25,7 @@ class InferenceMetrics:
     cache_hits: int = 0
     duplicate_rows: int = 0
     graph_misses: int = 0
+    device_batches: int = 0
     host_input_bytes: int = 0
     host_output_bytes: int = 0
     validation_cache_seconds: float = 0.0
@@ -69,11 +70,12 @@ class ExactCache:
 
 class Predictor:
     def __init__(self, model, batch_size=32, jit=True, *, cache_bytes=0, max_graphs=32,
-                 workers=1, tail_buckets=True):
-        if batch_size < 1 or max_graphs < 1 or workers < 0:
+                 workers=1, tail_buckets=True, group_size=16):
+        if batch_size < 1 or max_graphs < 1 or workers < 0 or group_size < 1:
             raise ValueError("invalid predictor capacity")
         self.model, self.batch_size, self.jit = model, int(batch_size), jit
         self.max_graphs, self.workers, self.tail_buckets = max_graphs, workers, tail_buckets
+        self.group_size = group_size
         self.compiled, self.staging = OrderedDict(), {}
         self.cache, self.metrics = ExactCache(cache_bytes), InferenceMetrics()
         self.positions = self.seconds = self.native_seconds = self.search_calls = 0
@@ -224,6 +226,7 @@ class Predictor:
             if not np.isfinite(result).all():
                 raise FloatingPointError("non-finite inference")
             self.metrics.evaluated_rows += count
+            self.metrics.device_batches += 1
             self.metrics.submitted_rows += rows
             self.metrics.submitted_actions += rows * width
             self.metrics.host_input_bytes += sum(a.nbytes for a in staging)
