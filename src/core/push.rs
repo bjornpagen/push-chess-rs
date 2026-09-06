@@ -124,6 +124,43 @@ pub fn resolve_knight_push(
     to: Square,
     long_first: bool,
 ) -> Option<PushPlan> {
+    let [leg1, leg2] = resolve_knight_legs(pos, from, to, long_first)?;
+
+    // Compose against the unchanged first plan, not already-updated entries.
+    let mut displacements = ArrayVec::new();
+    for &(original, current) in &leg1.displacements {
+        let final_sq = leg2
+            .displacements
+            .iter()
+            .find_map(|&(from, to)| (from == current).then_some(to))
+            .unwrap_or(current);
+        if original != final_sq {
+            displacements.push((original, final_sq));
+        }
+    }
+    for &(from, to) in &leg2.displacements {
+        if !leg1
+            .displacements
+            .iter()
+            .any(|&(_, current)| current == from)
+        {
+            displacements.push((from, to));
+        }
+    }
+    Some(PushPlan {
+        displacements,
+        captured: leg2.captured,
+    })
+}
+
+/// Sequential animation phases, each with simultaneous displacements. Search
+/// and presentation resolve exactly the same legs and preserve piece identity.
+pub fn resolve_knight_legs(
+    pos: &Position,
+    from: Square,
+    to: Square,
+    long_first: bool,
+) -> Option<[PushPlan; 2]> {
     if from >= 64 || to >= 64 {
         return None;
     }
@@ -156,29 +193,5 @@ pub fn resolve_knight_push(
     leg1.apply(&mut intermediate.board);
     let leg2 = resolve_push(&intermediate, mid, to, second.0, second.1)?;
 
-    // Compose against the unchanged first plan, not already-updated entries.
-    let mut displacements = ArrayVec::new();
-    for &(original, current) in &leg1.displacements {
-        let final_sq = leg2
-            .displacements
-            .iter()
-            .find_map(|&(from, to)| (from == current).then_some(to))
-            .unwrap_or(current);
-        if original != final_sq {
-            displacements.push((original, final_sq));
-        }
-    }
-    for &(from, to) in &leg2.displacements {
-        if !leg1
-            .displacements
-            .iter()
-            .any(|&(_, current)| current == from)
-        {
-            displacements.push((from, to));
-        }
-    }
-    Some(PushPlan {
-        displacements,
-        captured: leg2.captured,
-    })
+    Some([leg1, leg2])
 }

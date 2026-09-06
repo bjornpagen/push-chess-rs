@@ -488,26 +488,11 @@ impl Position {
 
         // Update castling rights
         self.zobrist ^= z.castling_keys[self.castling_rights as usize];
-        // King moves revoke both sides
-        if m.from == 4 || m.to == 4 {
-            self.castling_rights &= !(CASTLE_WK | CASTLE_WQ);
-        }
-        if m.from == 60 || m.to == 60 {
-            self.castling_rights &= !(CASTLE_BK | CASTLE_BQ);
-        }
-        // Rook moves/captures revoke the corresponding side
-        if m.from == 0 || m.to == 0 {
-            self.castling_rights &= !CASTLE_WQ;
-        }
-        if m.from == 7 || m.to == 7 {
-            self.castling_rights &= !CASTLE_WK;
-        }
-        if m.from == 56 || m.to == 56 {
-            self.castling_rights &= !CASTLE_BQ;
-        }
-        if m.from == 63 || m.to == 63 {
-            self.castling_rights &= !CASTLE_BK;
-        }
+        let affected = undo
+            .changed
+            .iter()
+            .fold(0, |mask, &(sq, _)| mask | (1u64 << sq));
+        self.castling_rights = castling_after_move(self.castling_rights, affected);
         self.zobrist ^= z.castling_keys[self.castling_rights as usize];
 
         // Update EP

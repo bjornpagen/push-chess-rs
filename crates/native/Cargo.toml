@@ -1,0 +1,15 @@
+[package]
+name = "push-chess-native"
+version = "0.1.0"
+edition = "2024"
+default-run = "play"
+publish = false
+
+[dependencies]
+push-chess = { path = "../..", features = ["historical-engines"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+crossterm = "0.28"
+ratatui = "0.29"
+
+[lints]
+workspace = true

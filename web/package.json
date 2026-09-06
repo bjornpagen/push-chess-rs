@@ -1,0 +1,26 @@
+{
+  "name": "@push-chess/cataclysm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": { "types": "./dist/client.d.ts", "import": "./dist/client.js" },
+    "./assets/*": "./dist/assets/*"
+  },
+  "files": ["dist", "scripts/copy-assets.mjs"],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "copy-assets": "node scripts/copy-assets.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node tests/native-fixtures.mjs && playwright test",
+    "test:ssr": "node --input-type=module -e \"await import('@push-chess/cataclysm')\"",
+    "test:package": "node --test tests/package.test.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "typescript": "7.0.2"
+  },
+  "engines": { "node": ">=22" },
+  "packageManager": "pnpm@11.15.1"
+}

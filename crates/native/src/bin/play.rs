@@ -12,12 +12,12 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use push_chess::candidates::find_engine;
-use push_chess::core::movegen::generate_legal_moves;
-use push_chess::core::position::{Position, start_position};
+use push_chess::core::position::Position;
 use push_chess::core::types::{
     self as chess, Move, PieceType, SearchBudget, SearchStats, SpecialMove,
 };
 use push_chess::engine::Engine;
+use push_chess::game::{Game, Outcome};
 
 // ============================================================================
 // Board rendering
@@ -149,7 +149,7 @@ fn move_label(mv: &Move) -> String {
 }
 
 struct App {
-    pos: Position,
+    game: Game,
     engine_name: String,
     player_is_white: bool,
     legal_moves: Vec<Move>,
@@ -179,9 +179,9 @@ impl App {
                 chess::Color::White
             },
         )?;
-        let pos = start_position();
+        let game = Game::default();
         let mut app = App {
-            pos,
+            game,
             engine_name: engine_name.to_string(),
             player_is_white: play_white,
             legal_moves: Vec::new(),
@@ -206,41 +206,31 @@ impl App {
 
     fn refresh_legal_moves(&mut self) {
         self.legal_moves.clear();
-        generate_legal_moves(&mut self.pos, &mut self.legal_moves);
+        self.legal_moves.extend_from_slice(self.game.legal_moves());
     }
 
     fn is_player_turn(&self) -> bool {
         !self.game_over
             && !self.engine_thinking
-            && ((self.player_is_white && self.pos.side_to_move == chess::Color::White)
-                || (!self.player_is_white && self.pos.side_to_move == chess::Color::Black))
+            && ((self.player_is_white && self.game.position().side_to_move == chess::Color::White)
+                || (!self.player_is_white
+                    && self.game.position().side_to_move == chess::Color::Black))
     }
 
     fn refresh_state(&mut self) {
         self.refresh_legal_moves();
-        let ending = if self.legal_moves.is_empty() {
-            Some(if self.pos.in_check() {
-                if (self.pos.side_to_move == chess::Color::White) == self.player_is_white {
-                    "Engine wins. You are checkmated."
-                } else {
+        let ending = match self.game.outcome() {
+            Outcome::Playing => None,
+            Outcome::Checkmate { winner } => Some(
+                if (*winner == chess::Color::White) == self.player_is_white {
                     "You win! Engine is checkmated."
-                }
-            } else {
-                "Draw — stalemate."
-            })
-        } else if self.pos.halfmove_clock >= 100 {
-            Some("Draw — fifty-move rule.")
-        } else if self
-            .pos
-            .undo_stack
-            .iter()
-            .filter(|u| u.zobrist == self.pos.zobrist)
-            .count()
-            >= 2
-        {
-            Some("Draw — threefold repetition.")
-        } else {
-            None
+                } else {
+                    "Engine wins. You are checkmated."
+                },
+            ),
+            Outcome::Stalemate => Some("Draw — stalemate."),
+            Outcome::FiftyMove => Some("Draw — fifty-move rule."),
+            Outcome::Repetition => Some("Draw — threefold repetition."),
         };
         if let Some(message) = ending {
             self.game_over = true;
@@ -257,7 +247,7 @@ impl App {
             return;
         }
         let request = SearchRequest {
-            pos: self.pos.clone(),
+            pos: self.game.position().clone(),
             budget: SearchBudget {
                 max_time_us: (self.think_time_ms * 1000) as i64,
                 seed: self.move_history.len() as u64,
@@ -302,12 +292,14 @@ impl App {
         if !self.legal_moves.contains(&chosen) {
             return false;
         }
-        let side = if self.pos.side_to_move == chess::Color::White {
+        let side = if self.game.position().side_to_move == chess::Color::White {
             "white"
         } else {
             "black"
         };
-        self.pos.make_move(&chosen);
+        if self.game.apply(chosen.id(), self.game.revision()).is_err() {
+            return false;
+        }
         self.move_history.push(MoveRecord {
             uci: move_label(&chosen),
             side,
@@ -431,8 +423,8 @@ impl App {
                     }
                 } else {
                     let sq = self.cursor_sq;
-                    let piece = self.pos.board[sq as usize];
-                    if !piece.is_empty() && piece.color == self.pos.side_to_move {
+                    let piece = self.game.position().board[sq as usize];
+                    if !piece.is_empty() && piece.color == self.game.position().side_to_move {
                         let has_moves = self.legal_moves.iter().any(|m| m.from == sq);
                         if has_moves {
                             self.selection = Selection::Piece(sq);
@@ -492,7 +484,7 @@ impl App {
         let board_inner = board_block.inner(main[0]);
         frame.render_widget(board_block, main[0]);
 
-        let fen = self.pos.to_fen();
+        let fen = self.game.position().to_fen();
         render_board_with_highlights(
             &fen,
             self.cursor_sq,
@@ -550,7 +542,7 @@ impl App {
         } else if self.is_player_turn() {
             format!(
                 "Your turn ({})",
-                if self.pos.side_to_move == chess::Color::White {
+                if self.game.position().side_to_move == chess::Color::White {
                     "white"
                 } else {
                     "black"
@@ -794,10 +786,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use push_chess::core::position::start_position;
 
     fn app_at(fen: &str) -> App {
         let mut app = App::new("cataclysm", true, 1).unwrap();
-        app.pos.set_from_fen(fen);
+        app.game = Game::from_fen(fen).unwrap();
         app.refresh_legal_moves();
         app
     }
@@ -867,9 +860,9 @@ mod tests {
     #[test]
     fn knight_route_is_selected_explicitly_and_popup_renders() {
         let mut app = app_at("7k/8/8/4R3/4N3/8/8/K7 w - - 0 1");
-        let before = app.pos.to_fen();
+        let before = app.game.position().to_fen();
         assert!(app.try_move(28, 45));
-        assert_eq!(app.pos.to_fen(), before);
+        assert_eq!(app.game.position().to_fen(), before);
         let Selection::Alternatives { moves, at } = &mut app.selection else {
             panic!("missing path chooser")
         };
@@ -888,7 +881,10 @@ mod tests {
         assert!(screen.contains("Choose move"));
         assert!(screen.contains("short leg first"));
         assert!(!app.handle_key(KeyCode::Enter));
-        assert_eq!(app.pos.undo_stack.last().unwrap().mv.path_kind, 2);
+        assert_eq!(
+            app.game.position().undo_stack.last().unwrap().mv.path_kind,
+            2
+        );
     }
 
     #[test]
@@ -903,18 +899,18 @@ mod tests {
             .position(|m| m.promo_piece == PieceType::Knight)
             .unwrap();
         app.handle_key(KeyCode::Enter);
-        assert_eq!(app.pos.board[56].piece_type, PieceType::Knight);
-        assert_eq!(app.pos.board[48].piece_type, PieceType::Rook);
+        assert_eq!(app.game.position().board[56].piece_type, PieceType::Knight);
+        assert_eq!(app.game.position().board[48].piece_type, PieceType::Rook);
     }
 
     #[test]
     fn cancelling_a_choice_does_not_move_or_quit() {
         let mut app = app_at("7k/8/8/4R3/4N3/8/8/K7 w - - 0 1");
-        let before = app.pos.to_fen();
+        let before = app.game.position().to_fen();
         assert!(app.try_move(28, 45));
         assert!(!app.handle_key(KeyCode::Esc));
         assert!(matches!(app.selection, Selection::Piece(28)));
-        assert_eq!(app.pos.to_fen(), before);
+        assert_eq!(app.game.position().to_fen(), before);
         assert!(!app.engine_thinking);
     }
 
@@ -923,7 +919,7 @@ mod tests {
         let mut app = app_at("7k/8/8/8/4N3/8/8/K7 w - - 0 1");
         assert!(app.try_move(28, 45));
         assert!(matches!(app.selection, Selection::None));
-        assert_eq!(app.pos.board[45].piece_type, PieceType::Knight);
+        assert_eq!(app.game.position().board[45].piece_type, PieceType::Knight);
     }
 
     #[test]
@@ -965,7 +961,7 @@ mod tests {
     fn invalid_engine_move_and_disconnected_worker_leave_board_intact() {
         for disconnect in [false, true] {
             let mut app = app_at("7k/8/8/8/8/8/8/K7 w - - 0 1");
-            let before = app.pos.to_fen();
+            let before = app.game.position().to_fen();
             let (outgoing, results) = mpsc::channel();
             let (requests, _incoming) = mpsc::channel();
             app.worker = EngineWorker { requests, results };
@@ -982,7 +978,7 @@ mod tests {
             app.check_engine_result();
             assert!(!app.engine_thinking);
             assert!(app.game_over);
-            assert_eq!(app.pos.to_fen(), before);
+            assert_eq!(app.game.position().to_fen(), before);
         }
     }
 }

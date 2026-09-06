@@ -1,4 +1,5 @@
 pub mod children;
+pub mod fen;
 pub mod movegen;
 pub mod position;
 pub mod push;

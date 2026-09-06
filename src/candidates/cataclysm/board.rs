@@ -34,12 +34,7 @@ pub fn step(sq: u8, dr: i32, df: i32) -> Option<u8> {
 }
 
 pub fn pack(m: Move) -> u32 {
-    u32::from(m.from)
-        | (u32::from(m.to) << 6)
-        | (u32::from(m.path_kind) << 12)
-        | (u32::from(m.stop_index) << 14)
-        | ((m.special as u32) << 18)
-        | ((m.promo_piece as u32) << 20)
+    m.id()
 }
 
 #[derive(Clone)]
@@ -523,11 +518,7 @@ impl Board {
             p.ep_square = make_square((rank_of(m.from) + rank_of(m.to)) / 2, file_of(m.from));
             p.zobrist ^= z.ep_keys[file_of(p.ep_square) as usize];
         }
-        for (sq, mask) in [(4, 3), (60, 12), (0, 2), (7, 1), (56, 8), (63, 4)] {
-            if m.from == sq || m.to == sq {
-                p.castling_rights &= !mask;
-            }
-        }
+        p.castling_rights = castling_after_move(p.castling_rights, touched);
         p.zobrist ^= z.castling_keys[old.castle as usize]
             ^ z.castling_keys[p.castling_rights as usize]
             ^ z.side_key;

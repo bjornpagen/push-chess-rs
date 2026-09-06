@@ -13,16 +13,51 @@ use crate::engine::Engine;
 use board::{Action, Board, pack};
 use eval::{VALUE, evaluate, piece_score};
 use network::Network;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 const MATE: i32 = 30_000;
 const WIN: i32 = 29_800;
 const INF: i32 = 31_000;
 const MAX: usize = 128;
-const BUCKETS: usize = 1 << 19;
 const EXACT: u8 = 1;
 const LOWER: u8 = 2;
 const UPPER: u8 = 3;
+
+#[derive(Clone, Copy, Debug)]
+pub enum HashSize {
+    MiB4,
+    MiB8,
+    MiB16,
+    MiB32,
+}
+
+impl TryFrom<u32> for HashSize {
+    type Error = &'static str;
+    fn try_from(mib: u32) -> Result<Self, Self::Error> {
+        match mib {
+            4 => Ok(Self::MiB4),
+            8 => Ok(Self::MiB8),
+            16 => Ok(Self::MiB16),
+            32 => Ok(Self::MiB32),
+            _ => Err("hashMiB must be 4, 8, 16, or 32"),
+        }
+    }
+}
+
+impl HashSize {
+    fn bytes(self) -> usize {
+        (match self {
+            Self::MiB4 => 4,
+            Self::MiB8 => 8,
+            Self::MiB16 => 16,
+            Self::MiB32 => 32,
+        }) * 1024
+            * 1024
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
@@ -54,7 +89,7 @@ fn decode(v: i16, ply: usize) -> i32 {
     }
 }
 
-struct Cataclysm {
+pub struct Cataclysm {
     model: &'static Network,
     table: Vec<[Entry; 4]>,
     age: u8,
@@ -80,16 +115,22 @@ struct Cataclysm {
 
 impl Cataclysm {
     fn new() -> Self {
+        Self::with_hash_size(HashSize::MiB32)
+    }
+
+    /// Fixed choices bound browser memory; one table is retained for the game.
+    pub fn with_hash_size(size: HashSize) -> Self {
+        let buckets = size.bytes() / size_of::<[Entry; 4]>();
         Self {
             model: Network::embedded(),
-            table: vec![[Entry::default(); 4]; BUCKETS],
+            table: vec![[Entry::default(); 4]; buckets],
             age: 0,
             history: vec![0; 2 * 3 * 64 * 64],
             killers: [[0; 2]; MAX],
             counters: vec![0; 2 * 7 * 64],
             previous: [0; MAX],
             statics: [0; MAX],
-            buffers: (0..MAX).map(|_| Vec::with_capacity(128)).collect(),
+            buffers: (0..MAX).map(|_| Vec::new()).collect(),
             path: Vec::new(),
             barrier: 0,
             root_depth: 0,
@@ -123,14 +164,15 @@ impl Cataclysm {
     }
 
     fn probe(&self, key: u64) -> Option<Entry> {
-        self.table[key as usize & (BUCKETS - 1)]
+        self.table[key as usize & (self.table.len() - 1)]
             .iter()
             .find(|e| e.flags & 3 != 0 && e.key == key)
             .copied()
     }
 
     fn save(&mut self, key: u64, mv: u32, depth: i32, v: i32, bound: u8, ply: usize) {
-        let bucket = &mut self.table[key as usize & (BUCKETS - 1)];
+        let index = key as usize & (self.table.len() - 1);
+        let bucket = &mut self.table[index];
         let at = bucket
             .iter()
             .position(|e| e.flags & 3 == 0 || e.key == key)

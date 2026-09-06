@@ -1,6 +1,11 @@
+use serde::{Deserialize, Serialize};
+
+#[cfg_attr(feature = "wasm", tsify::declare)]
 pub type Square = u8;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[repr(u8)]
 pub enum Color {
     #[default]
@@ -8,7 +13,9 @@ pub enum Color {
     Black = 1,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[repr(u8)]
 pub enum PieceType {
     #[default]
@@ -21,7 +28,9 @@ pub enum PieceType {
     King = 6,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[repr(u8)]
 pub enum SpecialMove {
     #[default]
@@ -39,6 +48,19 @@ pub struct Move {
     pub stop_index: u8,
     pub special: SpecialMove,
     pub promo_piece: PieceType,
+}
+
+impl Move {
+    /// Lossless wire identifier, resolved against the current legal move list.
+    /// Never decode an untrusted ID directly into a move.
+    pub fn id(self) -> u32 {
+        u32::from(self.from)
+            | (u32::from(self.to) << 6)
+            | (u32::from(self.path_kind) << 12)
+            | (u32::from(self.stop_index) << 14)
+            | ((self.special as u32) << 18)
+            | ((self.promo_piece as u32) << 20)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -105,6 +127,20 @@ pub const CASTLE_WK: u8 = 1;
 pub const CASTLE_WQ: u8 = 2;
 pub const CASTLE_BK: u8 = 4;
 pub const CASTLE_BQ: u8 = 8;
+
+/// Castling belongs to the original king/rooks, including when pushed. The
+/// affected-square set is shared by the rules engine and prepared search board.
+pub fn castling_after_move(rights: u8, affected: u64) -> u8 {
+    [(4, 3), (60, 12), (0, 2), (7, 1), (56, 8), (63, 4)]
+        .into_iter()
+        .fold(rights, |rights, (square, mask)| {
+            if affected & (1 << square) != 0 {
+                rights & !mask
+            } else {
+                rights
+            }
+        })
+}
 
 pub const PIECE_VALUES: [i32; 7] = [0, 100, 320, 330, 500, 900, 0];
 
