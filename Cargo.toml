@@ -2,6 +2,7 @@
 name = "push-chess"
 version = "0.1.0"
 edition = "2024"
+default-run = "play"
 
 [dependencies]
 arrayvec = "0.7"

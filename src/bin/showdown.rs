@@ -126,7 +126,7 @@ fn derive_generation(name: &str) -> i32 {
         "singularity" => 10,
         "omega" | "zenith" => 11,
         "astra" => 13,
-        "cataclysm" | "cataclysm-reference" | "cataclysm-candidate" => 14,
+        "cataclysm" => 14,
         _ => 12,
     }
 }

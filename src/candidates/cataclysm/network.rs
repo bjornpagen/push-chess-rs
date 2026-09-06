@@ -1,7 +1,7 @@
 //! Tiny, embedded NNUE residual, trained on outcomes of whole saved games.
 //! Both color perspectives are incrementally maintained with integer arithmetic.
 use crate::core::types::*;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 pub const WIDTH: usize = 32;
 type FeatureWeights = [[i16; WIDTH]; 768];
@@ -11,19 +11,14 @@ pub struct Network {
     output: [i16; WIDTH],
     pub fingerprint: u64,
 }
-static MODEL: LazyLock<Arc<Network>> = LazyLock::new(|| {
-    Arc::new(
-        Network::decode(include_bytes!("network.bin"))
-            .expect("embedded network has the specified shape"),
-    )
+static MODEL: LazyLock<Network> = LazyLock::new(|| {
+    Network::decode(include_bytes!("network.bin"))
+        .expect("embedded network has the specified shape")
 });
 
 impl Network {
-    pub fn embedded() -> Arc<Self> {
-        Arc::clone(&MODEL)
-    }
-    pub fn read(path: &std::path::Path) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
-        Ok(Arc::new(Self::decode(&std::fs::read(path)?)?))
+    pub fn embedded() -> &'static Self {
+        &MODEL
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         if bytes.len() != (768 * WIDTH + 2 * WIDTH) * 2 {

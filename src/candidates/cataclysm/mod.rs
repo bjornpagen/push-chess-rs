@@ -13,7 +13,6 @@ use crate::engine::Engine;
 use board::{Action, Board, pack};
 use eval::{VALUE, evaluate, piece_score};
 use network::Network;
-use std::sync::Arc;
 use std::time::Instant;
 
 const MATE: i32 = 30_000;
@@ -56,7 +55,7 @@ fn decode(v: i16, ply: usize) -> i32 {
 }
 
 struct Cataclysm {
-    model: Arc<Network>,
+    model: &'static Network,
     table: Vec<[Entry; 4]>,
     age: u8,
     history: Vec<i32>,
@@ -322,7 +321,8 @@ impl Cataclysm {
         let improving = ply >= 2 && stand > self.statics[ply - 2];
         if !check && !pv && ply > 0 && beta.abs() < WIN {
             if depth <= 5 && stand - 120 * depth - 40 >= beta {
-                return stand;
+                // Static pruning must not turn stalemate into a material score.
+                return if b.has_legal_move() { stand } else { 0 };
             }
             if null_ok
                 && depth >= 3
@@ -356,7 +356,11 @@ impl Cataclysm {
                     return 0;
                 }
                 if v >= beta {
-                    return v.min(WIN - 1);
+                    return if b.has_legal_move() {
+                        v.min(WIN - 1)
+                    } else {
+                        0
+                    };
                 }
             }
         }
@@ -608,7 +612,7 @@ impl Cataclysm {
 
 impl Engine for Cataclysm {
     fn name(&self) -> &str {
-        "Cataclysm 001"
+        "Cataclysm 002"
     }
     fn new_game(&mut self, _: Color, _: u64) {
         self.table.fill([Entry::default(); 4]);
@@ -647,7 +651,7 @@ impl Engine for Cataclysm {
                 },
             );
         };
-        let mut board = Board::with_model(pos, Arc::clone(&self.model));
+        let mut board = Board::new(pos);
         let proof_cap = if budget.max_depth > 0 {
             budget.max_depth
         } else {
@@ -711,7 +715,7 @@ impl Engine for Cataclysm {
             }
         }
         let mut pv = vec![best];
-        let mut view = Board::with_model(pos, Arc::clone(&self.model));
+        let mut view = Board::new(pos);
         let mut actions = Vec::new();
         let mut id = pack(best);
         let mut seen = Vec::new();
@@ -758,30 +762,6 @@ impl Engine for Cataclysm {
 
 pub fn create() -> Box<dyn Engine> {
     Box::new(Cataclysm::new())
-}
-
-/// Explicit model loading for reproducible self-play. The normal registry
-/// entry always uses embedded weights; environment settings cannot replace it.
-pub fn create_with_model(
-    path: &std::path::Path,
-) -> Result<Box<dyn Engine>, Box<dyn std::error::Error>> {
-    let model = Network::read(path)?;
-    let mut engine = Cataclysm::new();
-    engine.model = model;
-    Ok(Box::new(engine))
-}
-
-pub fn create_reference() -> Box<dyn Engine> {
-    create_with_model(std::path::Path::new(
-        &std::env::var("CATACLYSM_REFERENCE_MODEL").expect("CATACLYSM_REFERENCE_MODEL is required"),
-    ))
-    .expect("valid reference model")
-}
-pub fn create_candidate() -> Box<dyn Engine> {
-    create_with_model(std::path::Path::new(
-        &std::env::var("CATACLYSM_CANDIDATE_MODEL").expect("CATACLYSM_CANDIDATE_MODEL is required"),
-    ))
-    .expect("valid candidate model")
 }
 
 /// Differential oracle used by the all-history study and regression tests.
@@ -904,18 +884,18 @@ mod tests {
     }
 
     #[test]
-    fn loadable_model_preserves_embedded_engine_behavior() {
+    fn embedded_model_is_shared_and_search_is_deterministic() {
         assert!(Network::decode(&[0; 10]).is_err());
         let mut embedded = Cataclysm::new();
-        let mut loaded = Cataclysm::new();
-        loaded.model = Arc::new(Network::decode(include_bytes!("network.bin")).unwrap());
+        let mut repeated = Cataclysm::new();
+        assert!(std::ptr::eq(embedded.model, repeated.model));
         let budget = SearchBudget {
             max_nodes: 5000,
             ..SearchBudget::default()
         };
         let mut pos = start_position();
         let (a, sa) = embedded.choose_move(&mut pos, &budget);
-        let (b, sb) = loaded.choose_move(&mut pos, &budget);
+        let (b, sb) = repeated.choose_move(&mut pos, &budget);
         assert_eq!(a, b);
         assert_eq!(sa.eval_cp, sb.eval_cp);
         assert_eq!(sa.nodes, sb.nodes);
@@ -962,5 +942,18 @@ mod tests {
         );
         pos.set_from_fen("k3r3/8/8/8/8/8/8/4K3 w - - 100 1");
         assert_eq!(engine.qsearch(&mut Board::new(&pos), -INF, INF, 0, 0), 0);
+    }
+
+    #[test]
+    fn main_search_static_pruning_preserves_stalemate() {
+        let mut engine = Cataclysm::new();
+        let mut pos = Position::empty();
+        pos.set_from_fen("7k/5K2/6Q1/8/8/8/8/8 b - - 0 1");
+        for depth in 1..=5 {
+            assert_eq!(
+                engine.search(&mut Board::new(&pos), depth, -2501, -2500, 1, true),
+                0
+            );
+        }
     }
 }

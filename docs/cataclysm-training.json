@@ -1,7 +1,0 @@
-{
-"games": [709, 171], "visited_move_rows": 68186, "positions": [43960,9923], "validation_overlap_removed": 1937,
-"seed":20260905,"max_game":932,"hidden":32,"bytes":49280,"model_fnv1a64":"89d502491ca870eb",
-"baseline_validation_cross_entropy":0.5216595278149718,"selected_validation_cross_entropy":0.5136984121340141,"quantized_validation_cross_entropy":0.5137462225446829,"selected_epoch":2,
-"labels":"smoothed final outcome only","split":"FNV-1a whole-game signature modulo five, with duplicate games and overlapping validation positions removed",
-"epochs":[{"epoch":1,"training":0.49537315093960743,"validation":0.5156146841317737},{"epoch":2,"training":0.4934529846045615,"validation":0.5136984121340141},{"epoch":3,"training":0.4895692251664141,"validation":0.517090162632648},{"epoch":4,"training":0.4827509012290271,"validation":0.5168535872208818},{"epoch":5,"training":0.47171833573066313,"validation":0.5220586489718495},{"epoch":6,"training":0.45837711505189715,"validation":0.5241095448429375},{"epoch":7,"training":0.44615381240623303,"validation":0.5274645213446846},{"epoch":8,"training":0.4367926672364046,"validation":0.530164545490349},{"epoch":9,"training":0.4297282780488481,"validation":0.5335808082215812},{"epoch":10,"training":0.42443908756078913,"validation":0.5367632158717328}]
-}

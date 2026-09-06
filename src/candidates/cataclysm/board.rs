@@ -6,7 +6,6 @@ use crate::core::position::Position;
 use crate::core::push::{PushPlan, resolve_knight_push, resolve_push};
 use crate::core::types::*;
 use crate::core::zobrist::zobrist_tables;
-use std::sync::Arc;
 
 pub const DIRS: [(i32, i32); 8] = [
     (1, 0),
@@ -60,7 +59,7 @@ impl Action {
 }
 
 pub struct Board {
-    pub model: Arc<Network>,
+    pub model: &'static Network,
     pub pos: Position,
     pub men: [[u64; 7]; 2],
     pub occupied: [u64; 2],
@@ -90,10 +89,7 @@ pub struct Snapshot {
 
 impl Board {
     pub fn new(pos: &Position) -> Self {
-        Self::with_model(pos, Network::embedded())
-    }
-
-    pub fn with_model(pos: &Position, model: Arc<Network>) -> Self {
+        let model = Network::embedded();
         let mut view = Position::empty();
         view.board = pos.board;
         view.side_to_move = pos.side_to_move;
@@ -110,7 +106,7 @@ impl Board {
             mg: [0; 2],
             eg: [0; 2],
             phase: 0,
-            net: Accumulator::new(&model),
+            net: Accumulator::new(model),
             material: [0; 2],
             model,
         };
@@ -124,7 +120,7 @@ impl Board {
                 b.mg[c] += mg;
                 b.eg[c] += eg;
                 b.phase += PHASE[p.piece_type as usize];
-                b.net.update(p, sq as u8, 1, &b.model);
+                b.net.update(p, sq as u8, 1, b.model);
                 b.material[c] += super::eval::VALUE[p.piece_type as usize];
             }
         }
@@ -553,7 +549,7 @@ impl Board {
                 self.mg[c] -= mg;
                 self.eg[c] -= eg;
                 self.phase -= PHASE[pt];
-                self.net.update(before, sq as u8, -1, &self.model);
+                self.net.update(before, sq as u8, -1, self.model);
                 self.material[c] -= super::eval::VALUE[pt];
             }
             if !after.is_empty() {
@@ -566,7 +562,7 @@ impl Board {
                 self.mg[c] += mg;
                 self.eg[c] += eg;
                 self.phase += PHASE[pt];
-                self.net.update(after, sq as u8, 1, &self.model);
+                self.net.update(after, sq as u8, 1, self.model);
                 self.material[c] += super::eval::VALUE[pt];
                 if after.piece_type == PieceType::King {
                     p.king_sq[c] = sq as u8;

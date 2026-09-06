@@ -40,7 +40,7 @@ pub fn piece_score(p: Piece, sq: u8) -> (i32, i32) {
 pub fn evaluate(b: &Board) -> i32 {
     let phase = b.phase.min(24);
     let baseline = ((b.mg[0] - b.mg[1]) * phase + (b.eg[0] - b.eg[1]) * (24 - phase)) / 24;
-    let mut white = baseline + b.net.white_residual(&b.model) / 2;
+    let mut white = baseline + b.net.white_residual(b.model) / 2;
     for c in 0..2 {
         let sign = if c == 0 { 1 } else { -1 };
         let mut pawns = b.men[c][1];
