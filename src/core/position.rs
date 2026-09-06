@@ -1,4 +1,4 @@
-use super::push::{resolve_knight_push, resolve_push};
+use super::push::{PushPlan, resolve_knight_push, resolve_push};
 /// Position representation for Push Chess, ported from C++ `core/position.h` + `core/position.cc`.
 use super::types::*;
 use super::zobrist::zobrist_tables;
@@ -12,6 +12,7 @@ use arrayvec::ArrayVec;
 pub struct UndoInfo {
     pub mv: Move,
     changed: ArrayVec<(Square, Piece), 32>,
+    touched: u64,
     pub castling_rights: u8,
     pub ep_square: Square,
     pub halfmove_clock: u16,
@@ -24,6 +25,7 @@ impl Default for UndoInfo {
         Self {
             mv: Move::default(),
             changed: ArrayVec::new(),
+            touched: 0,
             castling_rights: 0,
             ep_square: 64,
             halfmove_clock: 0,
@@ -35,8 +37,10 @@ impl Default for UndoInfo {
 
 impl UndoInfo {
     pub fn add_changed(&mut self, sq: Square, old_piece: Piece) {
-        if !self.changed.iter().any(|&(changed_sq, _)| changed_sq == sq) {
+        let bit = 1u64 << sq;
+        if self.touched & bit == 0 {
             self.changed.push((sq, old_piece));
+            self.touched |= bit;
         }
     }
 }
@@ -106,7 +110,7 @@ impl Default for Position {
 
 impl Position {
     /// Lightweight constructor — empty board, no zobrist, no undo stack.
-    /// Used by resolve_knight_push for the temporary board copy.
+    /// For callers that construct a rules position explicitly.
     pub fn empty() -> Self {
         Self {
             board: [Piece::default(); 64],
@@ -300,6 +304,29 @@ impl Position {
     // -------------------------------------------------------------------
 
     pub fn make_move(&mut self, m: &Move) {
+        let plan = if matches!(m.special, SpecialMove::Castle | SpecialMove::EnPassant) {
+            None
+        } else if self.board[m.from as usize].piece_type == PieceType::Knight {
+            Some(
+                resolve_knight_push(self, m.from, m.to, m.path_kind == 1)
+                    .expect("make_move requires a generated knight move"),
+            )
+        } else {
+            Some(
+                resolve_push(
+                    self,
+                    m.from,
+                    m.to,
+                    (rank_of(m.to) - rank_of(m.from)).signum(),
+                    (file_of(m.to) - file_of(m.from)).signum(),
+                )
+                .expect("make_move requires a generated push"),
+            )
+        };
+        self.make_resolved(m, plan.as_ref());
+    }
+
+    pub(crate) fn make_resolved(&mut self, m: &Move, plan: Option<&PushPlan>) {
         let z = zobrist_tables();
 
         // Save undo info
@@ -388,27 +415,7 @@ impl Position {
         } else {
             // Normal move or promotion: resolve push chain
             let is_pawn = mover.piece_type == PieceType::Pawn;
-            let is_knight = mover.piece_type == PieceType::Knight;
-
-            let push_info = if is_knight {
-                let long_first = m.path_kind == 1;
-                resolve_knight_push(self, m.from, m.to, long_first)
-            } else {
-                let rd = rank_of(m.to) - rank_of(m.from);
-                let fd = file_of(m.to) - file_of(m.from);
-                let dr = if rd != 0 {
-                    if rd > 0 { 1 } else { -1 }
-                } else {
-                    0
-                };
-                let dc = if fd != 0 {
-                    if fd > 0 { 1 } else { -1 }
-                } else {
-                    0
-                };
-                resolve_push(self, m.from, m.to, dr, dc)
-            }
-            .expect("make_move requires a generated move with a valid push path");
+            let push_info = plan.expect("prepared normal move has a push plan");
 
             // Record all squares that will change
             for di in 0..push_info.displacements().len() {
@@ -430,25 +437,7 @@ impl Position {
                 }
             }
 
-            push_info.apply(&mut self.board);
-
-            // Handle promotion (either mover or pushed pawn)
-            if m.promo_piece != PieceType::None {
-                let promo_rank = if us as u8 == Color::White as u8 {
-                    7i32
-                } else {
-                    0i32
-                };
-                for &(_, to) in push_info.displacements() {
-                    if self.board[to as usize].piece_type == PieceType::Pawn
-                        && self.board[to as usize].color == us
-                        && rank_of(to) == promo_rank
-                    {
-                        self.board[to as usize].piece_type = m.promo_piece;
-                        break;
-                    }
-                }
-            }
+            push_info.apply_promoting(&mut self.board, us, m.promo_piece);
 
             // XOR in all pieces at affected squares
             for ci in 0..undo.changed.len() {
@@ -488,10 +477,7 @@ impl Position {
 
         // Update castling rights
         self.zobrist ^= z.castling_keys[self.castling_rights as usize];
-        let affected = undo
-            .changed
-            .iter()
-            .fold(0, |mask, &(sq, _)| mask | (1u64 << sq));
+        let affected = undo.touched;
         self.castling_rights = castling_after_move(self.castling_rights, affected);
         self.zobrist ^= z.castling_keys[self.castling_rights as usize];
 
@@ -539,6 +525,33 @@ impl Position {
         self.ep_square = undo.ep_square;
         self.halfmove_clock = undo.halfmove_clock;
         self.zobrist = undo.zobrist;
+    }
+
+    /// Board-only history view without cloning or mutating the search cursor.
+    /// Useful for neural features; undo details remain private to the rules.
+    pub fn previous_board(&self) -> Option<[Piece; 64]> {
+        self.undo_stack.last().map(|undo| {
+            let mut board = self.board;
+            for &(sq, piece) in &undo.changed {
+                board[sq as usize] = piece;
+            }
+            board
+        })
+    }
+
+    /// A cheap search cursor: copies current board/metadata, not undo history.
+    pub fn without_history(&self) -> Self {
+        Self {
+            board: self.board,
+            side_to_move: self.side_to_move,
+            castling_rights: self.castling_rights,
+            ep_square: self.ep_square,
+            halfmove_clock: self.halfmove_clock,
+            fullmove_number: self.fullmove_number,
+            king_sq: self.king_sq,
+            zobrist: self.zobrist,
+            undo_stack: Vec::new(),
+        }
     }
 
     // -------------------------------------------------------------------

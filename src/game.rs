@@ -52,7 +52,22 @@ pub enum Outcome {
 
 /// Shared with the native CLI. Mate takes precedence over either draw rule.
 pub fn adjudicate(pos: &Position, legal: &[Move]) -> Outcome {
-    if legal.is_empty() {
+    let repeats = pos
+        .undo_stack
+        .iter()
+        .filter(|u| u.zobrist == pos.zobrist)
+        .take(2)
+        .count();
+    adjudicate_with_repetitions(pos, legal.is_empty(), repeats)
+}
+
+/// Search cursors supply repetitions from their immutable prefix + local path.
+pub(crate) fn adjudicate_with_repetitions(
+    pos: &Position,
+    no_legal_moves: bool,
+    repeats: usize,
+) -> Outcome {
+    if no_legal_moves {
         if pos.in_check() {
             Outcome::Checkmate {
                 winner: opponent(pos.side_to_move),
@@ -62,14 +77,7 @@ pub fn adjudicate(pos: &Position, legal: &[Move]) -> Outcome {
         }
     } else if pos.halfmove_clock >= 100 {
         Outcome::FiftyMove
-    } else if pos
-        .undo_stack
-        .iter()
-        .filter(|u| u.zobrist == pos.zobrist)
-        .take(2)
-        .count()
-        >= 2
-    {
+    } else if repeats >= 2 {
         Outcome::Repetition
     } else {
         Outcome::Playing

@@ -1,0 +1,5 @@
+# Keep the downloaded third-party library locally. Versioned IDs, fetcher,
+# hashes in per-paper metadata, and authored notes make it reproducible.
+# Review upstream redistribution rights before deliberately vendoring papers.
+arxiv/
+__pycache__/

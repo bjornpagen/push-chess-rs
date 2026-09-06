@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[project]
+name = "pushzero"
+version = "0.1.0"
+description = "Rules-only Push Chess self-play with tinygrad and Metal"
+requires-python = ">=3.12"
+license-files = ["training/licenses/mctx-APACHE-2.0.txt"]
+dependencies = ["tinygrad==0.14.0", "numpy==2.5.3"]
+
+[project.scripts]
+pushzero = "pushzero.cli:main"
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "maturin==1.15.0"]
+
+[tool.maturin]
+manifest-path = "training/native/Cargo.toml"
+python-source = "training"
+module-name = "pushzero._native"
+include = [
+  { path = "training/THIRD_PARTY.md", format = ["sdist", "wheel"] },
+  { path = "training/licenses/mctx-APACHE-2.0.txt", format = "sdist" },
+]
+
+[tool.pytest.ini_options]
+testpaths = ["training/tests"]

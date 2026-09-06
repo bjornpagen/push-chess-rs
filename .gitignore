@@ -10,3 +10,9 @@ pushchess.db-shm
 /web/test-results
 /web/playwright-report
 /web/tests/native-fixtures.json
+/.venv
+/training/native/target
+/training/pushzero/*.so
+__pycache__/
+.pytest_cache/
+*.egg-info/

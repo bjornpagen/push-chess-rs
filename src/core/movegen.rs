@@ -2,8 +2,28 @@ use super::children::{LendingIterator, PseudoLegalChildren};
 /// Legal and pseudo-legal move generation for Push Chess,
 /// ported 1:1 from C++ `core/movegen.cc`.
 use super::position::Position;
+use super::prepared::PreparedMove;
 use super::push::{PushPlan, resolve_knight_push, resolve_push};
 use super::types::*;
+
+pub(crate) trait MoveSink {
+    fn emit(&mut self, mv: Move, plan: Option<&PushPlan>);
+}
+
+impl MoveSink for Vec<Move> {
+    fn emit(&mut self, mv: Move, _plan: Option<&PushPlan>) {
+        self.push(mv);
+    }
+}
+
+impl MoveSink for Vec<PreparedMove> {
+    fn emit(&mut self, mv: Move, plan: Option<&PushPlan>) {
+        self.push(PreparedMove {
+            mv,
+            plan: plan.cloned(),
+        });
+    }
+}
 
 const RAY_DR: [i32; 8] = [1, -1, 0, 0, 1, 1, -1, -1];
 const RAY_DC: [i32; 8] = [0, 0, 1, -1, 1, -1, 1, -1];
@@ -27,7 +47,7 @@ fn needs_promotion(pos: &Position, info: &PushPlan, us: Color) -> bool {
 
 /// Add a move (or 4 promotion moves) to the output list.
 fn add_move(
-    out: &mut Vec<Move>,
+    out: &mut impl MoveSink,
     pos: &Position,
     info: &PushPlan,
     from: Square,
@@ -44,24 +64,30 @@ fn add_move(
             PieceType::Bishop,
             PieceType::Knight,
         ] {
-            out.push(Move {
+            out.emit(
+                Move {
+                    from,
+                    to,
+                    path_kind,
+                    stop_index,
+                    special: SpecialMove::Promotion,
+                    promo_piece: promo,
+                },
+                Some(info),
+            );
+        }
+    } else {
+        out.emit(
+            Move {
                 from,
                 to,
                 path_kind,
                 stop_index,
-                special: SpecialMove::Promotion,
-                promo_piece: promo,
-            });
-        }
-    } else {
-        out.push(Move {
-            from,
-            to,
-            path_kind,
-            stop_index,
-            special,
-            promo_piece: PieceType::None,
-        });
+                special,
+                promo_piece: PieceType::None,
+            },
+            Some(info),
+        );
     }
 }
 
@@ -72,7 +98,7 @@ fn gen_slider_moves(
     us: Color,
     dir_start: usize,
     dir_end: usize,
-    out: &mut Vec<Move>,
+    out: &mut impl MoveSink,
 ) {
     for dir in dir_start..dir_end {
         let dr = RAY_DR[dir];
@@ -101,7 +127,7 @@ fn gen_slider_moves(
 }
 
 /// Generate pawn moves (forward 1, forward 2, diagonal captures, en passant).
-fn gen_pawn_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>) {
+fn gen_pawn_moves(pos: &Position, from: Square, us: Color, out: &mut impl MoveSink) {
     let dr: i32 = if us == Color::White { 1 } else { -1 };
     let start_rank: i32 = if us == Color::White { 1 } else { 6 };
     let r = rank_of(from);
@@ -163,20 +189,23 @@ fn gen_pawn_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>) 
         let ep_f = file_of(pos.ep_square);
         if ep_r == r + dr && (ep_f == f - 1 || ep_f == f + 1) {
             let to = pos.ep_square;
-            out.push(Move {
-                from,
-                to,
-                path_kind: 0,
-                stop_index: 0,
-                special: SpecialMove::EnPassant,
-                promo_piece: PieceType::None,
-            });
+            out.emit(
+                Move {
+                    from,
+                    to,
+                    path_kind: 0,
+                    stop_index: 0,
+                    special: SpecialMove::EnPassant,
+                    promo_piece: PieceType::None,
+                },
+                None,
+            );
         }
     }
 }
 
 /// Generate knight moves (two path decompositions per target square).
-fn gen_knight_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>) {
+fn gen_knight_moves(pos: &Position, from: Square, us: Color, out: &mut impl MoveSink) {
     for i in 0..8 {
         let r = rank_of(from) + KNIGHT_DR[i];
         let f = file_of(from) + KNIGHT_DC[i];
@@ -199,7 +228,7 @@ fn gen_knight_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>
 }
 
 /// Generate king moves (normal + castling).
-fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>) {
+fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut impl MoveSink) {
     let r = rank_of(from);
     let f = file_of(from);
 
@@ -213,24 +242,30 @@ fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>) 
         let to = make_square(nr, nf);
 
         if pos.board[to as usize].is_empty() {
-            out.push(Move {
-                from,
-                to,
-                path_kind: 0,
-                stop_index: 0,
-                special: SpecialMove::None,
-                promo_piece: PieceType::None,
-            });
+            out.emit(
+                Move {
+                    from,
+                    to,
+                    path_kind: 0,
+                    stop_index: 0,
+                    special: SpecialMove::None,
+                    promo_piece: PieceType::None,
+                },
+                Some(&PushPlan::single(from, to, None)),
+            );
         } else if !pos.board[to as usize].is_color(us) {
             // Capture enemy piece
-            out.push(Move {
-                from,
-                to,
-                path_kind: 0,
-                stop_index: 0,
-                special: SpecialMove::None,
-                promo_piece: PieceType::None,
-            });
+            out.emit(
+                Move {
+                    from,
+                    to,
+                    path_kind: 0,
+                    stop_index: 0,
+                    special: SpecialMove::None,
+                    promo_piece: PieceType::None,
+                },
+                Some(&PushPlan::single(from, to, Some(to))),
+            );
         } else {
             // Friendly piece — king pushes it along the movement direction
             if let Some(info) = resolve_push(pos, from, to, RAY_DR[dir], RAY_DC[dir]) {
@@ -262,14 +297,17 @@ fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>) 
             && !pos.is_attacked_by(f_sq, them)
             && !pos.is_attacked_by(g_sq, them)
         {
-            out.push(Move {
-                from,
-                to: g_sq,
-                path_kind: 0,
-                stop_index: 0,
-                special: SpecialMove::Castle,
-                promo_piece: PieceType::None,
-            });
+            out.emit(
+                Move {
+                    from,
+                    to: g_sq,
+                    path_kind: 0,
+                    stop_index: 0,
+                    special: SpecialMove::Castle,
+                    promo_piece: PieceType::None,
+                },
+                None,
+            );
         }
     }
 
@@ -290,20 +328,27 @@ fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut Vec<Move>) 
             && !pos.is_attacked_by(d_sq, them)
             && !pos.is_attacked_by(c_sq, them)
         {
-            out.push(Move {
-                from,
-                to: c_sq,
-                path_kind: 0,
-                stop_index: 0,
-                special: SpecialMove::Castle,
-                promo_piece: PieceType::None,
-            });
+            out.emit(
+                Move {
+                    from,
+                    to: c_sq,
+                    path_kind: 0,
+                    stop_index: 0,
+                    special: SpecialMove::Castle,
+                    promo_piece: PieceType::None,
+                },
+                None,
+            );
         }
     }
 }
 
 /// Generate all pseudo-legal moves for the side to move.
 pub fn generate_pseudo_legal_moves(pos: &Position, out: &mut Vec<Move>) {
+    generate_into(pos, out);
+}
+
+pub(crate) fn generate_into(pos: &Position, out: &mut impl MoveSink) {
     let us = pos.side_to_move;
 
     for sq in 0u8..64 {
@@ -327,6 +372,25 @@ pub fn generate_pseudo_legal_moves(pos: &Position, out: &mut Vec<Move>) {
 /// Generate all legal moves for the side to move.
 /// Uses make/unmake on the mutable position to test legality.
 pub fn generate_legal_moves(pos: &mut Position, out: &mut Vec<Move>) {
+    let start = out.len();
+    generate_pseudo_legal_moves(pos, out);
+    let us = pos.side_to_move;
+    let mut write = start;
+    for read in start..out.len() {
+        let mv = out[read];
+        pos.make_move(&mv);
+        let legal = !pos.in_check_color(us);
+        pos.unmake_move();
+        if legal {
+            out[write] = mv;
+            write += 1;
+        }
+    }
+    out.truncate(write);
+}
+
+/// Original lending-iterator path retained for differential validation.
+pub fn generate_legal_moves_reference(pos: &mut Position, out: &mut Vec<Move>) {
     let us = pos.side_to_move;
     let mut children = PseudoLegalChildren::new(pos);
     while let Some(child) = children.next() {

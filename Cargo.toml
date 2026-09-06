@@ -7,6 +7,7 @@ autobins = false
 [workspace]
 members = ["crates/native", "crates/wasm"]
 default-members = [".", "crates/native"]
+exclude = ["training/native"]
 resolver = "3"
 
 [features]

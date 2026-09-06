@@ -45,11 +45,35 @@ impl PushPlan {
             board[to as usize] = original[from as usize];
         }
     }
+
+    pub(crate) fn apply_promoting(&self, board: &mut [Piece; 64], us: Color, promotion: PieceType) {
+        self.apply(board);
+        if promotion != PieceType::None {
+            let rank = if us == Color::White { 7 } else { 0 };
+            for &(_, to) in &self.displacements {
+                let piece = &mut board[to as usize];
+                if piece.piece_type == PieceType::Pawn && piece.color == us && rank_of(to) == rank {
+                    piece.piece_type = promotion;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Resolve a straight path. Invalid public inputs return `None`, never loop.
 pub fn resolve_push(
     pos: &Position,
+    from: Square,
+    to: Square,
+    dr: i32,
+    dc: i32,
+) -> Option<PushPlan> {
+    resolve_on_board(&pos.board, from, to, dr, dc)
+}
+
+fn resolve_on_board(
+    board: &[Piece; 64],
     from: Square,
     to: Square,
     dr: i32,
@@ -61,11 +85,11 @@ pub fn resolve_push(
         || !(-1..=1).contains(&dr)
         || !(-1..=1).contains(&dc)
         || (dr == 0 && dc == 0)
-        || pos.board[from as usize].is_empty()
+        || board[from as usize].is_empty()
     {
         return None;
     }
-    let mover_color = pos.board[from as usize].color;
+    let mover_color = board[from as usize].color;
     let mut chain = ArrayVec::<Square, 8>::new();
     let mut r = rank_of(from) + dr;
     let mut f = file_of(from) + dc;
@@ -75,7 +99,7 @@ pub fn resolve_push(
             return None;
         }
         let sq = make_square(r, f);
-        let piece = pos.board[sq as usize];
+        let piece = board[sq as usize];
         if piece.is_color(mover_color) {
             chain.push(sq);
         } else if !piece.is_empty() {
@@ -98,7 +122,7 @@ pub fn resolve_push(
             return None;
         }
         let sq = make_square(r, f);
-        let piece = pos.board[sq as usize];
+        let piece = board[sq as usize];
         if piece.is_color(mover_color) {
             chain.push(sq);
         } else if !piece.is_empty() {
@@ -188,10 +212,9 @@ pub fn resolve_knight_legs(
         return None;
     }
 
-    let mut intermediate = Position::empty();
-    intermediate.board = pos.board;
-    leg1.apply(&mut intermediate.board);
-    let leg2 = resolve_push(&intermediate, mid, to, second.0, second.1)?;
+    let mut intermediate = pos.board;
+    leg1.apply(&mut intermediate);
+    let leg2 = resolve_on_board(&intermediate, mid, to, second.0, second.1)?;
 
     Some([leg1, leg2])
 }

@@ -1,0 +1,406 @@
+{
+  "collected": "2026-09-06",
+  "papers": [
+    {
+      "id": "1712.01815v1",
+      "slug": "alphazero",
+      "title": "Mastering Chess and Shogi by Self-Play with a General Reinforcement Learning Algorithm",
+      "authors": [
+        "David Silver",
+        "Thomas Hubert",
+        "Julian Schrittwieser",
+        "Ioannis Antonoglou",
+        "Matthew Lai",
+        "Arthur Guez",
+        "Marc Lanctot",
+        "Laurent Sifre",
+        "Dharshan Kumaran",
+        "Thore Graepel",
+        "Timothy Lillicrap",
+        "Karen Simonyan",
+        "Demis Hassabis"
+      ],
+      "role": "foundation",
+      "source_url": "https://arxiv.org/src/1712.01815v1",
+      "fetched_utc": "2026-09-06T22:27:55.147834+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 278299,
+        "sha256": "f716dd43261d46a66f4ad24ac5e96e6b0ed805222cad8aacd1e7fa4be1237078"
+      },
+      "metadata_xml_sha256": "43b87d09b752bf6bf178f929fbb5778bfa367fdb8866fb30c48bbd1097ea67ab"
+    },
+    {
+      "id": "1902.10565v5",
+      "slug": "katago",
+      "title": "Accelerating Self-Play Learning in Go",
+      "authors": [
+        "David J. Wu"
+      ],
+      "role": "core-efficiency",
+      "source_url": "https://arxiv.org/src/1902.10565v5",
+      "fetched_utc": "2026-09-06T22:28:01.088726+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 948682,
+        "sha256": "71a0e8946078158c7d63bff54514051bfb832d74c403a3b93dfaa2d3c8fa6c4e"
+      },
+      "metadata_xml_sha256": "aaca9c46e1b977e4eef61de9a0cca1edd85f12bbc251b391517a9d31d503f32c"
+    },
+    {
+      "id": "2007.12509v1",
+      "slug": "mcts-policy-optimization",
+      "title": "Monte-Carlo Tree Search as Regularized Policy Optimization",
+      "authors": [
+        "Jean-Bastien Grill",
+        "Florent Altché",
+        "Yunhao Tang",
+        "Thomas Hubert",
+        "Michal Valko",
+        "Ioannis Antonoglou",
+        "Rémi Munos"
+      ],
+      "role": "search-theory",
+      "source_url": "https://arxiv.org/src/2007.12509v1",
+      "fetched_utc": "2026-09-06T22:28:08.161792+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 1535112,
+        "sha256": "734835c505386f9c6ac9b42048ed02fcf9afe1d9e5c8d65b479d350071aae7e8"
+      },
+      "metadata_xml_sha256": "d0fd68fdd525f50343c98bf23209bc08a466b897e4e795fe97c7211484df056e"
+    },
+    {
+      "id": "2104.04278v1",
+      "slug": "batch-mcts",
+      "title": "Batch Monte Carlo Tree Search",
+      "authors": [
+        "Tristan Cazenave"
+      ],
+      "role": "search-systems",
+      "source_url": "https://arxiv.org/src/2104.04278v1",
+      "fetched_utc": "2026-09-06T22:28:26.002642+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 110541,
+        "sha256": "b55b8aa616d862ad9ee1583b9cfe2ddc0efc88de985e9f6edd5d073939a5b199"
+      },
+      "metadata_xml_sha256": "46c129715fc2386b859a8c116e519d140a8da6fa012134dc8ac06eb37a25366c"
+    },
+    {
+      "id": "2012.11045v1",
+      "slug": "graph-search",
+      "title": "Monte-Carlo Graph Search for AlphaZero",
+      "authors": [
+        "Johannes Czech",
+        "Patrick Korus",
+        "Kristian Kersting"
+      ],
+      "role": "search-alternative",
+      "source_url": "https://arxiv.org/src/2012.11045v1",
+      "fetched_utc": "2026-09-06T22:28:32.326401+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 348907,
+        "sha256": "dc1d002f0c463e1f9d58b3022909530390413fab731e9746a3912dd275a138bb"
+      },
+      "metadata_xml_sha256": "682b00ad629793a77aebf5ad69fe9611bb2969503c13c5e0bebbc398bec9380f"
+    },
+    {
+      "id": "2104.06294v1",
+      "slug": "muzero-reanalyse",
+      "title": "Online and Offline Reinforcement Learning by Planning with a Learned Model",
+      "authors": [
+        "Julian Schrittwieser",
+        "Thomas Hubert",
+        "Amol Mandhane",
+        "Mohammadamin Barekatain",
+        "Ioannis Antonoglou",
+        "David Silver"
+      ],
+      "role": "data-efficiency",
+      "source_url": "https://arxiv.org/src/2104.06294v1",
+      "fetched_utc": "2026-09-06T22:28:38.703179+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 1756388,
+        "sha256": "26cc84ac321ff1ada0eec3ad8257cf4bab473e3ef154c6fbafbbfacb5f7e2800"
+      },
+      "metadata_xml_sha256": "9165ecc47b80fa7a807a9193a19665248fc4f9907e73117835bd4a1b49530294"
+    },
+    {
+      "id": "2104.03113v2",
+      "slug": "board-game-scaling",
+      "title": "Scaling Scaling Laws with Board Games",
+      "authors": [
+        "Andy L. Jones"
+      ],
+      "role": "compute-allocation",
+      "source_url": "https://arxiv.org/src/2104.03113v2",
+      "fetched_utc": "2026-09-06T22:28:44.446991+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 235005,
+        "sha256": "f826d8065006126fd3b55fdcef4241564004b2b0f599a4ae22a49b7d3c0a55fd"
+      },
+      "metadata_xml_sha256": "63a99852020b43d24a9680557bb215f04abf808a8b9f190ffd4f451f8fef1921"
+    },
+    {
+      "id": "2412.11979v2",
+      "slug": "neural-scaling-zipf",
+      "title": "AlphaZero Neural Scaling and Zipf's Law: a Tale of Board Games and Power Laws",
+      "authors": [
+        "Oren Neumann",
+        "Claudius Gros"
+      ],
+      "role": "compute-allocation",
+      "source_url": "https://arxiv.org/src/2412.11979v2",
+      "fetched_utc": "2026-09-06T22:29:05.579837+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 6691422,
+        "sha256": "aa71688a01df43ae1e4be88245ecd4637817180b7e5d262c6b6d344c0e0b1ef5"
+      },
+      "metadata_xml_sha256": "83257adbc4a06fba77e787c425f3beeeef1bd2129d2d40717dcf19998907916e"
+    },
+    {
+      "id": "2602.20809v1",
+      "slug": "regret-search-control",
+      "title": "Regret-Guided Search Control for Efficient Learning in AlphaZero",
+      "authors": [
+        "Yun-Jui Tsai",
+        "Wei-Yu Chen",
+        "Yan-Ru Ju",
+        "Yu-Hung Chang",
+        "Ti-Rong Wu"
+      ],
+      "role": "experimental-curriculum",
+      "source_url": "https://arxiv.org/src/2602.20809v1",
+      "fetched_utc": "2026-09-06T22:29:11.295976+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 1913672,
+        "sha256": "ab1a00beb50bedc0a90e2cb3c5c44c547d7c0d41fee26addebe92ee6b178b0d5"
+      },
+      "metadata_xml_sha256": "7cd50ed70266d2c741d3fe8c56927b4b67c5e1cfacb9cae8e3d3f1a32eb59bcd"
+    },
+    {
+      "id": "2302.12359v2",
+      "slug": "go-exploit",
+      "title": "Targeted Search Control in AlphaZero for Effective Policy Improvement",
+      "authors": [
+        "Alexandre Trudeau",
+        "Michael Bowling"
+      ],
+      "role": "restart-curriculum",
+      "source_url": "https://arxiv.org/src/2302.12359v2",
+      "fetched_utc": "2026-09-06T22:47:46.096155+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 1216446,
+        "sha256": "945c637986c68d9f64d938f446b0b23c4053f757f5112d005b1b1802aaa06b7b"
+      },
+      "metadata_xml_sha256": "b1aee0ac793788b0c5681b0be804035fe16ed548cc3212cf296c98d8a06e664b"
+    },
+    {
+      "id": "2003.06212v1",
+      "slug": "population-based-alphazero",
+      "title": "Accelerating and Improving AlphaZero Using Population Based Training",
+      "authors": [
+        "Ti-Rong Wu",
+        "Ting-Han Wei",
+        "I-Chen Wu"
+      ],
+      "role": "experimental-tuning",
+      "source_url": "https://arxiv.org/src/2003.06212v1",
+      "fetched_utc": "2026-09-06T22:29:17.645564+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 1968065,
+        "sha256": "7f5dadcc8127a494b8dd1eacbfd2dd1474c0d966beef90e9b1da17964b793ba2"
+      },
+      "metadata_xml_sha256": "f95f82460f2c4a3061efa3406d2c1ca72656fecf65795911707f7801c8a9d533"
+    },
+    {
+      "id": "2211.00241v4",
+      "slug": "adversarial-go",
+      "title": "Adversarial Policies Beat Superhuman Go AIs",
+      "authors": [
+        "Tony T. Wang",
+        "Adam Gleave",
+        "Tom Tseng",
+        "Kellin Pelrine",
+        "Nora Belrose",
+        "Joseph Miller",
+        "Michael D. Dennis",
+        "Yawen Duan",
+        "Viktor Pogrebniak",
+        "Sergey Levine",
+        "Stuart Russell"
+      ],
+      "role": "robustness",
+      "source_url": "https://arxiv.org/src/2211.00241v4",
+      "fetched_utc": "2026-09-06T22:29:24.725478+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 4810653,
+        "sha256": "1739e8046f02196322dd969792e859827445476ef327dfc377063d5f3b19664a"
+      },
+      "metadata_xml_sha256": "7f1562ea00dcbe20995e971f723a3b67e505d9e76b5d03f37d7ec039ce9593b2"
+    },
+    {
+      "id": "1911.08265v2",
+      "slug": "muzero",
+      "title": "Mastering Atari, Go, Chess and Shogi by Planning with a Learned Model",
+      "authors": [
+        "Julian Schrittwieser",
+        "Ioannis Antonoglou",
+        "Thomas Hubert",
+        "Karen Simonyan",
+        "Laurent Sifre",
+        "Simon Schmitt",
+        "Arthur Guez",
+        "Edward Lockhart",
+        "Demis Hassabis",
+        "Thore Graepel",
+        "Timothy Lillicrap",
+        "David Silver"
+      ],
+      "role": "architecture-alternative",
+      "source_url": "https://arxiv.org/src/1911.08265v2",
+      "fetched_utc": "2026-09-06T22:29:29.817012+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 3043999,
+        "sha256": "6394a801c3d4227919eccd3481b9a543676042ab2d8f6fa4f66b2fd059f4312c"
+      },
+      "metadata_xml_sha256": "9e526071878df69a0a0a926e8da2e84648a9599bf43fbfee4087cb4cea0f258a"
+    },
+    {
+      "id": "2111.00210v2",
+      "slug": "efficientzero",
+      "title": "Mastering Atari Games with Limited Data",
+      "authors": [
+        "Weirui Ye",
+        "Shaohuai Liu",
+        "Thanard Kurutach",
+        "Pieter Abbeel",
+        "Yang Gao"
+      ],
+      "role": "architecture-alternative",
+      "source_url": "https://arxiv.org/src/2111.00210v2",
+      "fetched_utc": "2026-09-06T22:29:37.297246+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 2555147,
+        "sha256": "f75c33b911c837a4e99ee04b8d00ed4343f2ad60b3ce458e5e3609a87930a3db"
+      },
+      "metadata_xml_sha256": "e2ddc472fae04c4463157b9d0fd01e7d59a5c89a6eaa29f61ebc9d855757eb97"
+    },
+    {
+      "id": "2403.00564v2",
+      "slug": "efficientzero-v2",
+      "title": "EfficientZero V2: Mastering Discrete and Continuous Control with Limited Data",
+      "authors": [
+        "Shengjie Wang",
+        "Shaohuai Liu",
+        "Weirui Ye",
+        "Jiacheng You",
+        "Yang Gao"
+      ],
+      "role": "architecture-alternative",
+      "source_url": "https://arxiv.org/src/2403.00564v2",
+      "fetched_utc": "2026-09-06T22:29:48.541755+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 9066446,
+        "sha256": "385ef8d0b4409213372143af1da630cf07fec7775b4e659a7598603e8857c8d4"
+      },
+      "metadata_xml_sha256": "b3823b31d4b829f4e15bc74fdd1b5dfda6e50ff21e179cc333fc7819f9db5031"
+    },
+    {
+      "id": "2402.04494v2",
+      "slug": "amortized-chess-transformer",
+      "title": "Amortized Planning with Large-Scale Transformers: A Case Study on Chess",
+      "authors": [
+        "Anian Ruoss",
+        "Grégoire Delétang",
+        "Sourabh Medapati",
+        "Jordi Grau-Moya",
+        "Li Kevin Wenliang",
+        "Elliot Catt",
+        "John Reid",
+        "Cannada A. Lewis",
+        "Joel Veness",
+        "Tim Genewein"
+      ],
+      "role": "architecture-counterpoint",
+      "source_url": "https://arxiv.org/src/2402.04494v2",
+      "fetched_utc": "2026-09-06T22:30:06.677625+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 2773382,
+        "sha256": "93b6c6e1f1611ce0b89ebd7a8f3a6139dea36d0f27241f93284c68bd14281f83"
+      },
+      "metadata_xml_sha256": "262dcd97af7b46b00deca8c88ffb2a30c7c6ce6d4f272bbf676ebde724dee420"
+    },
+    {
+      "id": "2104.06303v1",
+      "slug": "sampled-muzero",
+      "title": "Learning and Planning in Complex Action Spaces",
+      "authors": [
+        "Thomas Hubert",
+        "Julian Schrittwieser",
+        "Ioannis Antonoglou",
+        "Mohammadamin Barekatain",
+        "Simon Schmitt",
+        "David Silver"
+      ],
+      "role": "action-space-alternative",
+      "source_url": "https://arxiv.org/src/2104.06303v1",
+      "fetched_utc": "2026-09-06T22:30:14.116765+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 6046478,
+        "sha256": "877fce0d61311936870ef1b1bb72046d9b59fdd2e07a43553f640e8a866ea136"
+      },
+      "metadata_xml_sha256": "d7cd50edafb4d320946f0dd449533d19b2d8baa7cd8275a4a7c2d6b1538ab91b"
+    },
+    {
+      "id": "2504.07757v1",
+      "slug": "search-contempt",
+      "title": "Search-contempt: a hybrid MCTS algorithm for training AlphaZero-like engines with better computational efficiency",
+      "authors": [
+        "Ameya Joshi"
+      ],
+      "role": "speculative-search",
+      "source_url": "https://arxiv.org/src/2504.07757v1",
+      "fetched_utc": "2026-09-06T22:30:17.989559+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 157734,
+        "sha256": "9e15d9da8c81d8987e408200fd9f01581794dd698e9415d2efdd32e8c6bdb1fc"
+      },
+      "metadata_xml_sha256": "e270f0d28c5bfd4d2e9752ea6941c64996821c573aed2d529b5f278df7e28bfc"
+    },
+    {
+      "id": "2411.13900v1",
+      "slug": "apple-branch-predictors",
+      "title": "Dissecting Conditional Branch Predictors of Apple Firestorm and Qualcomm Oryon for Software Optimization and Architectural Analysis",
+      "authors": [
+        "Jiajie Chen",
+        "Peng Qu",
+        "Youhui Zhang"
+      ],
+      "role": "hardware-background",
+      "source_url": "https://arxiv.org/src/2411.13900v1",
+      "fetched_utc": "2026-09-06T22:30:24.308047+00:00",
+      "archive": {
+        "path": "source.tar.gz",
+        "bytes": 121919,
+        "sha256": "f8822f44e81f3587f3d7d6959121bf326a4b3827ad67b08f3e472f878cede63b"
+      },
+      "metadata_xml_sha256": "a78525f0947a9cac5c7be69eb9c77f926ee346c460971936039cf1fb6f682687"
+    }
+  ]
+}

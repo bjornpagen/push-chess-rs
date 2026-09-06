@@ -1,0 +1,21 @@
+[
+  {"id":"1712.01815v1","slug":"alphazero","role":"foundation"},
+  {"id":"1902.10565v5","slug":"katago","role":"core-efficiency"},
+  {"id":"2007.12509v1","slug":"mcts-policy-optimization","role":"search-theory"},
+  {"id":"2104.04278v1","slug":"batch-mcts","role":"search-systems"},
+  {"id":"2012.11045v1","slug":"graph-search","role":"search-alternative"},
+  {"id":"2104.06294v1","slug":"muzero-reanalyse","role":"data-efficiency"},
+  {"id":"2104.03113v2","slug":"board-game-scaling","role":"compute-allocation"},
+  {"id":"2412.11979v2","slug":"neural-scaling-zipf","role":"compute-allocation"},
+  {"id":"2602.20809v1","slug":"regret-search-control","role":"experimental-curriculum"},
+  {"id":"2302.12359v2","slug":"go-exploit","role":"restart-curriculum"},
+  {"id":"2003.06212v1","slug":"population-based-alphazero","role":"experimental-tuning"},
+  {"id":"2211.00241v4","slug":"adversarial-go","role":"robustness"},
+  {"id":"1911.08265v2","slug":"muzero","role":"architecture-alternative"},
+  {"id":"2111.00210v2","slug":"efficientzero","role":"architecture-alternative"},
+  {"id":"2403.00564v2","slug":"efficientzero-v2","role":"architecture-alternative"},
+  {"id":"2402.04494v2","slug":"amortized-chess-transformer","role":"architecture-counterpoint"},
+  {"id":"2104.06303v1","slug":"sampled-muzero","role":"action-space-alternative"},
+  {"id":"2504.07757v1","slug":"search-contempt","role":"speculative-search"},
+  {"id":"2411.13900v1","slug":"apple-branch-predictors","role":"hardware-background"}
+]
