@@ -71,6 +71,10 @@ effect permutation, native ownership, history reconstruction and pool shutdown.
 Final checks and bounded-run results are recorded in [verification.md](verification.md).
 Tests containing tiny gradient updates use temporary fixtures, not the paused
 training run. No strength or speed improvement is inferred from passing tests.
+After the implementation was committed and pushed, a short smoke run and its
+resume passed, followed by a three-minute pilot (64 games, 85 updates, zero
+pending updates). Warm inference probes and their limitations are recorded in
+the verification report. The original paused experiment remains unchanged.
 
 ## Still gated / deliberately not claimed
 
