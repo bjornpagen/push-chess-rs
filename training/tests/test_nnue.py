@@ -243,7 +243,8 @@ def test_source_selection_dedup_filters_and_equal_game_weight(monkeypatch, tmp_p
     short["in_check"][3] = True
     rows = [short, long, capped, other, copy.deepcopy(short)]
     # The real game stream has explicit close(); keep the stub equally strict.
-    def stream(*a, **kw): yield from rows
+    def stream(*a, runs, **kw):
+        yield from (row for row in rows if row["run_id"] in runs)
     monkeypatch.setattr(nnue, "games", stream)
     data = nnue.dataset(tmp_path, runs=[2], split="train", positions_per_game=16)
     assert data.provenance["retained_games"] == 2
@@ -257,6 +258,10 @@ def test_source_selection_dedup_filters_and_equal_game_weight(monkeypatch, tmp_p
     with pytest.raises(ValueError): nnue.dataset(tmp_path, runs=[], split="train")
     with pytest.raises(ValueError): nnue.dataset(tmp_path, runs=[2], split="test")
     with pytest.raises(ValueError, match="no eligible"): nnue.dataset(tmp_path, runs=[99], split="train")
+    def unexpected(*a, **kw): yield other
+    monkeypatch.setattr(nnue, "games", unexpected)
+    with pytest.raises(ValueError, match="source run mismatch"):
+        nnue.dataset(tmp_path, runs=[2], split="train")
 
 
 def test_bounded_training_requires_holdout_and_saves_only_models(monkeypatch, tmp_path):

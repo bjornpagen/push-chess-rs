@@ -387,31 +387,62 @@ impl Corpus {
     }
     /// Short-lived snapshots: never pin an hours-long read across map growth.
     /// Failed/unsealed runs and interrupted games are excluded. Interrupted
-    /// runs retain their already verified complete games.
-    pub fn page(&self, split: &str, after: (u64, u64), limit: usize) -> Result<CorpusPage> {
+    /// runs retain their already verified complete games. Explicit source runs
+    /// are all checked before reading any trajectory; None selects all eligible
+    /// runs. Filtering happens before replay and Python feature construction.
+    pub fn page(
+        &self,
+        split: &str,
+        after: (u64, u64),
+        limit: usize,
+        runs: Option<&[u64]>,
+    ) -> Result<CorpusPage> {
         let selected = split_id(split)?;
         if !(1..=32).contains(&limit) {
             return Err("page limit must be 1..=32".into());
         }
+        if runs.is_some_and(|ids| ids.is_empty() || ids.contains(&0)) {
+            return Err("source runs must be nonempty positive IDs".into());
+        }
         let w = work()?;
         let snapshot = self.db.snapshot(&w)?;
         let frame = snapshot.frame(&w);
-        let mut ids = frame
-            .scan_facts::<Run>()?
-            .map(|r| r.map(|r| r.id.0))
-            .collect::<bumbledb::Result<Vec<_>>>()?;
+        let mut ids = if let Some(ids) = runs {
+            ids.to_vec()
+        } else {
+            frame
+                .scan_facts::<Run>()?
+                .map(|r| r.map(|r| r.id.0))
+                .collect::<bumbledb::Result<Vec<_>>>()?
+        };
         ids.sort_unstable();
-        let mut games = Vec::new();
-        let mut cursor = after;
-        for id in ids.into_iter().filter(|id| *id >= after.0) {
-            let run = frame.get(RunById { id: RunId(id) })?.ok_or("missing run")?;
+        ids.dedup();
+        let mut sources = Vec::with_capacity(ids.len());
+        for id in ids {
+            let run = frame
+                .get(RunById { id: RunId(id) })?
+                .ok_or_else(|| format!("unknown source run {id}"))?;
             let Some(end) = frame.get(RunEndByRun { run: RunId(id) })? else {
+                if runs.is_some() {
+                    return Err(format!("source run {id} is unsealed").into());
+                }
                 continue;
             };
             if end.status == RunStatus::Failed.id() {
+                if runs.is_some() {
+                    return Err(format!("source run {id} failed and is quarantined").into());
+                }
                 continue;
             }
-            let config: RunConfig = relational::config(&frame, &run)?;
+            if id >= after.0 {
+                let config: RunConfig = relational::config(&frame, &run)?;
+                sources.push((run, config));
+            }
+        }
+        let mut games = Vec::new();
+        let mut cursor = after;
+        for (run, config) in sources {
+            let id = run.id.0;
             let start = if id == after.0 {
                 after.1.saturating_add(1)
             } else {
@@ -494,7 +525,14 @@ mod tests {
         let run = corpus.start(&config()).unwrap();
         corpus.save(run, &game).unwrap();
         assert!(corpus.save(run, &game).is_err());
-        assert_eq!(corpus.page(&game.split, (0, 0), 1).unwrap().games.len(), 0);
+        assert_eq!(
+            corpus
+                .page(&game.split, (0, 0), 1, None)
+                .unwrap()
+                .games
+                .len(),
+            0
+        );
         corpus.finish(run, "finished", None).unwrap();
         assert!(corpus.save(run, &game).is_err());
         let summary = corpus.summary().unwrap();
@@ -502,12 +540,19 @@ mod tests {
             summary["totals"],
             json!({"games":1,"moves":8,"positions":9,"analyses":4,"terminal_games":0})
         );
-        let page = corpus.page(&game.split, (0, 0), 1).unwrap();
+        let page = corpus.page(&game.split, (0, 0), 1, None).unwrap();
         assert_eq!(page.games[0].trajectory.plies, game.plies);
         assert_eq!(page.games[0].trajectory.final_fen, game.final_fen);
         assert_eq!(corpus.verify(run).unwrap()["verified_games"], 1);
         let cursor = page.cursor;
-        assert_eq!(corpus.page(&game.split, cursor, 1).unwrap().games.len(), 0);
+        assert_eq!(
+            corpus
+                .page(&game.split, cursor, 1, None)
+                .unwrap()
+                .games
+                .len(),
+            0
+        );
         corpus.close().unwrap();
         drop(corpus);
         let corpus = Corpus::open(&dir.path().join("corpus")).unwrap();
@@ -648,13 +693,120 @@ mod tests {
         corpus
             .finish(run, "failed", Some("fixture failure"))
             .unwrap();
-        assert_eq!(corpus.page(&game.split, (0, 0), 8).unwrap().games.len(), 0);
+        assert_eq!(
+            corpus
+                .page(&game.split, (0, 0), 8, None)
+                .unwrap()
+                .games
+                .len(),
+            0
+        );
         let run = corpus.start(&config()).unwrap();
         corpus.save(run, &game).unwrap();
         corpus.finish(run, "interrupted", None).unwrap();
-        assert_eq!(corpus.page(&game.split, (0, 0), 8).unwrap().games.len(), 1);
+        assert_eq!(
+            corpus
+                .page(&game.split, (0, 0), 8, None)
+                .unwrap()
+                .games
+                .len(),
+            1
+        );
         corpus.close().unwrap();
     }
+
+    #[test]
+    fn explicit_sources_are_validated_before_the_first_page() {
+        let (_dir, mut corpus) = create();
+        let game = fixture();
+        let sealed = corpus.start(&config()).unwrap();
+        corpus.save(sealed, &game).unwrap();
+        corpus.finish(sealed, "finished", None).unwrap();
+        let unsealed = corpus.start(&config()).unwrap();
+        let failed = corpus.start(&config()).unwrap();
+        corpus.finish(failed, "failed", Some("fixture")).unwrap();
+        for (ids, message) in [
+            (vec![], "nonempty positive"),
+            (vec![sealed, 0], "nonempty positive"),
+            (vec![sealed, 999], "unknown source run 999"),
+            (vec![sealed, unsealed], "unsealed"),
+            (vec![sealed, failed], "quarantined"),
+        ] {
+            // Even a one-game page must not yield the valid first run before
+            // noticing a later invalid request. Cursor position cannot hide it.
+            for cursor in [(0, 0), (999, 0)] {
+                let error = corpus
+                    .page(&game.split, cursor, 1, Some(&ids))
+                    .err()
+                    .expect("invalid explicit source");
+                assert!(error.to_string().contains(message), "{error}");
+            }
+        }
+        let page = corpus.page(&game.split, (0, 0), 8, None).unwrap();
+        assert_eq!(page.games.len(), 1);
+        assert_eq!(page.games[0].run_id, sealed);
+        corpus.finish(unsealed, "interrupted", None).unwrap();
+        let page = corpus
+            .page(&game.split, (0, 0), 8, Some(&[unsealed, sealed]))
+            .unwrap();
+        assert_eq!(page.games.len(), 1);
+        corpus.close().unwrap();
+    }
+
+    #[test]
+    fn source_filter_skips_replay_and_pages_selected_runs_once() {
+        let (_dir, mut corpus) = create();
+        let game = fixture();
+        let mut runs = Vec::new();
+        for _ in 0..3 {
+            let run = corpus.start(&config()).unwrap();
+            corpus.save(run, &game).unwrap();
+            corpus.finish(run, "finished", None).unwrap();
+            runs.push(run);
+        }
+        // Poison an unselected run: if filtering moves after reconstruction,
+        // the selected read will now fail instead of merely getting slower.
+        let w = work().unwrap();
+        let mut values = Vec::new();
+        {
+            let snapshot = corpus.db.snapshot(&w).unwrap();
+            let frame = snapshot.frame(&w);
+            let fact = frame
+                .scan_facts::<PieceRemoved>()
+                .unwrap()
+                .map(|r| r.unwrap())
+                .find(|r| r.run.0 == runs[1])
+                .unwrap();
+            fact.append_values(&mut values).unwrap();
+        }
+        let mut draft = ChangeSet::builder(corpus.db.schema(), w.clone());
+        draft.delete(PieceRemoved::RELATION, &values).unwrap();
+        corpus.apply(draft, &w).unwrap();
+        let selection = [runs[2], runs[0], runs[2]];
+        let mut cursor = (0, 0);
+        for run in [runs[0], runs[2]] {
+            let page = corpus
+                .page(&game.split, cursor, 1, Some(&selection))
+                .unwrap();
+            assert_eq!(page.games.len(), 1);
+            assert_eq!(page.games[0].run_id, run);
+            assert_eq!(page.games[0].trajectory, game);
+            assert!(!page.done);
+            cursor = page.cursor;
+        }
+        let page = corpus
+            .page(&game.split, cursor, 1, Some(&selection))
+            .unwrap();
+        assert!(page.done && page.games.is_empty());
+        assert!(corpus.page(&game.split, (0, 0), 8, None).is_err());
+        assert!(
+            corpus
+                .page(&game.split, (0, 0), 8, Some(&[runs[1]]))
+                .is_err()
+        );
+        corpus.close().unwrap();
+    }
+
     #[test]
     fn complete_worker_pipeline_and_pre_stopped_shutdown() {
         let (_dir, mut corpus) = create();

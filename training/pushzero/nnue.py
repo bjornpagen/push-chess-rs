@@ -200,10 +200,10 @@ def dataset(path, *, runs, split, max_games=10000, positions_per_game=16, seed=1
         raise ValueError("bounded positive game/position limits required")
     rng, retained, seen, scanned = np.random.default_rng(seed), [], 0, 0
     duplicates, trajectories, identities = 0, set(), set()
-    stream = games(path, split, nnue=True)
+    stream = games(path, split, nnue=True, runs=runs)
     try:
         for game in stream:
-            if game["run_id"] not in runs: continue
+            if game["run_id"] not in runs: raise ValueError("corpus source run mismatch")
             if game["split"] != split: raise ValueError("corpus split mismatch")
             scanned += 1
             if game["white_value"] is None: continue

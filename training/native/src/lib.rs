@@ -795,7 +795,7 @@ impl CorpusReader {
             ),
         })
     }
-    #[pyo3(signature = (split="train", after=(0,0), limit=8, nnue=false))]
+    #[pyo3(signature = (split="train", after=(0,0), limit=8, nnue=false, runs=None))]
     fn page<'py>(
         &self,
         py: Python<'py>,
@@ -803,10 +803,11 @@ impl CorpusReader {
         after: (u64, u64),
         limit: usize,
         nnue: bool,
+        runs: Option<Vec<u64>>,
     ) -> PyResult<PythonCorpusPage<'py>> {
         let page = self
             .corpus()?
-            .page(split, after, limit)
+            .page(split, after, limit, runs.as_deref())
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let mut games = Vec::with_capacity(page.games.len());
         for game in page.games {

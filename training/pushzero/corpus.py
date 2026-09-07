@@ -4,12 +4,12 @@ from ._native import CorpusReader, State
 from .replay import GameLog, CompactSample, ObservationCache, Replay
 
 
-def games(path, split="train", page_size=8, *, nnue=False):
+def games(path, split="train", page_size=8, *, nnue=False, runs=None):
     reader = CorpusReader(str(path))
     try:
         cursor = (0, 0)
         while True:
-            batch, cursor, done = reader.page(split, cursor, page_size, nnue=nnue)
+            batch, cursor, done = reader.page(split, cursor, page_size, nnue=nnue, runs=runs)
             yield from batch
             if done: break
     finally:

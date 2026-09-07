@@ -83,6 +83,23 @@ def test_nnue_page_features_are_owned_and_match_exact_replay(corpus):
         assert game["in_check"].dtype == np.bool_ and game["in_check"].shape == (len(states),)
 
 
+def test_source_run_selection_reaches_native_pages_and_rejects_partial_requests(corpus):
+    selected = [g for split in ("train", "validation", "test")
+                for g in games(corpus, split, page_size=1, nnue=True, runs=[1,1])]
+    assert len(selected) == 6 and {g["run_id"] for g in selected} == {1}
+    reader = CorpusReader(str(corpus))
+    try:
+        for runs, message in (([], "nonempty positive"), ([0,1], "nonempty positive"), ([1,999], "unknown source run")):
+            with pytest.raises(ValueError, match=message): reader.page(limit=1, runs=runs)
+    finally:
+        reader.close()
+    # The generator must also close its owner when native selection fails.
+    with pytest.raises(ValueError, match="unknown source run"):
+        list(games(corpus, runs=[1,999]))
+    reader = CorpusReader(str(corpus))
+    reader.close()
+
+
 def test_nnue_training_from_real_terminal_relations(tmp_path):
     from pushzero.nnue import train, load, export
     lab = Path(__file__).resolve().parents[2] / "target/release/lab"

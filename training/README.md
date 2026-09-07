@@ -55,7 +55,12 @@ uv run pushzero nnue export models/residual-r2.safetensors \
   --output models/residual-r2.bin
 ```
 
-Source runs must be explicit. Both training and validation need eligible
+Source runs must be explicit. The native page reader validates every requested
+run before yielding its first game: unknown, unsealed and failed sources are
+errors, even when another requested source is valid. An interrupted sealed run
+can still supply its complete games. Run selection happens before relational
+reconstruction, rules replay and NNUE feature construction, not after Python
+has received unrelated trajectories. Both training and validation need eligible
 terminal games; there is no fallback to training-set validation. Test/arena
 families are never read. Whole trajectories are deduplicated; eligible games
 are reservoir-sampled, with up to 16 positions retained per game. Batches
@@ -147,6 +152,13 @@ during CPU search. No candidate may use a built-in name. No game is persisted
 by these diagnostic calls; tournament generation is still the durable path.
 
 ## Typed forensic access
+
+`games(path, split, runs=[2,3])` and `CorpusReader.page(..., runs=[2,3])` share
+the native source-selection contract. IDs are sorted/deduplicated; cursor
+pagination visits only those runs. Omitting `runs` selects all eligible sealed
+runs and retains quarantine filtering; an explicit empty list is an error.
+Split/outcome restrictions remain in force. This changes no database schema
+and creates no copied dataset or persistent analysis file.
 
 `CorpusReader.state(run,game,ply)` restores the actual prefix, including draw
 history, rather than constructing a history-free state from a FEN. This is an

@@ -89,6 +89,9 @@ The `pushzero nnue` path refines the small existing residual from explicit,
 sealed bumbledb source runs. It keeps terminal outcomes separate from raw
 search scores and exports an isolated candidate. See training/README.md for
 the arithmetic, sampling, strict holdout and preservation-of-control contract.
+Explicit run IDs are validated together at the native boundary; invalid sources
+cannot silently become a partial training request. Unselected runs are skipped
+before trajectory replay or feature construction.
 
 ## Process ownership and resource policy
 
