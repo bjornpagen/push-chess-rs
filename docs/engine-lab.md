@@ -246,3 +246,26 @@ After the current store owner exits and its corpus is audited, compare
 `--engines cataclysm,waypoint --purpose arena` on fresh color-swapped families,
 then confirm at a deeper wall-time budget. Keep NNUE refinement as a separate
 candidate so its effect is not confounded with this ordering change.
+
+## Audit search cost by entrant
+
+`lab verify --db DIRECTORY --run N` derives `search_cost` and
+`search_by_engine` during its existing full replay audit. There is one fixed-size
+accumulator per entrant, no retained position sample, second game scan, alternate
+analysis store or extra database facts. White/black ownership follows each
+game's actual entrants, including color-swapped games; an unplayed entrant
+reports zero searches and absent means, not a zero-time performance observation.
+
+Counts include completed and incomplete searches, excluding opening moves.
+The report gives total external wall time, engine-reported time, maximum wall
+time, overruns against the configured time budget, mean/max depth, quiescence
+nodes, table hits and optional proof-search observations. An absent proof
+search differs from a reported zero-node proof search. Mate-proof reports are
+not independently verified certificates.
+
+Node rate is `sum(nodes) / sum(search_wall_seconds)`, not an average of individual
+rates or games per campaign second. Summed search time across concurrent workers
+is not elapsed campaign time. These descriptive rates reflect actual positions,
+engine node-count conventions and machine contention; they do not establish
+equal-work speedups or isolate inference time. Use them to select the next
+controlled profile/benchmark, alongside paired playing results.

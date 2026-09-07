@@ -3,6 +3,75 @@
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+/// Bounded descriptive totals, never a second copy of position observations.
+/// Only call after the trajectory's side/timing/provenance checks have passed.
+#[derive(Default)]
+pub(super) struct SearchCost {
+    pub searches: u64,
+    pub complete: u64,
+    pub nodes: u64,
+    pub wall_us: u64,
+    pub overruns: u64,
+    reported_us: u64,
+    max_wall_us: u64,
+    depth: u64,
+    max_depth: u32,
+    seldepth: u64,
+    qnodes: u64,
+    tt_hits: u64,
+    proof_searches: u64,
+    proof_nodes: u64,
+    mate_proof_reports: u64,
+}
+
+impl SearchCost {
+    pub fn record(&mut self, ply: &super::Ply, budget_us: Option<u64>) {
+        if ply.score.is_none() {
+            return; // Opening moves are not zero-cost searches.
+        }
+        self.searches += 1;
+        self.complete += u64::from(ply.search_complete);
+        self.nodes += ply.nodes;
+        self.wall_us += ply.wall_us as u64;
+        self.reported_us += ply.reported_us as u64;
+        self.max_wall_us = self.max_wall_us.max(ply.wall_us as u64);
+        self.overruns += u64::from(budget_us.is_some_and(|us| ply.wall_us as u64 > us));
+        self.depth += u64::from(ply.depth);
+        self.max_depth = self.max_depth.max(ply.depth);
+        self.seldepth += u64::from(ply.seldepth);
+        self.qnodes += ply.diagnostics.qnodes;
+        self.tt_hits += ply.diagnostics.tt_hits;
+        if let Some(nodes) = ply.diagnostics.proof_nodes {
+            self.proof_searches += 1;
+            self.proof_nodes += nodes;
+        }
+        self.mate_proof_reports += u64::from(ply.diagnostics.mate_proof_plies.is_some());
+    }
+
+    pub fn report(&self) -> Value {
+        let ratio = |numerator: u64, denominator: u64| {
+            (denominator > 0).then(|| numerator as f64 / denominator as f64)
+        };
+        json!({
+            "searches":self.searches,"completed_searches":self.complete,
+            "completion_fraction":ratio(self.complete,self.searches),
+            "nodes":self.nodes,"wall_us":self.wall_us,"reported_us":self.reported_us,
+            "max_wall_us":(self.searches>0).then_some(self.max_wall_us),
+            "mean_wall_us":ratio(self.wall_us,self.searches),
+            "nodes_per_wall_second":ratio(self.nodes,self.wall_us).map(|n|n*1_000_000.),
+            "time_overruns":self.overruns,
+            "mean_depth_all_searches":ratio(self.depth,self.searches),
+            "max_depth":(self.searches>0).then_some(self.max_depth),
+            "mean_seldepth_all_searches":ratio(self.seldepth,self.searches),
+            "qnodes":self.qnodes,"qnode_fraction":ratio(self.qnodes,self.nodes),
+            "tt_hits":self.tt_hits,"tt_hits_per_node":ratio(self.tt_hits,self.nodes),
+            "proof_searches":self.proof_searches,"proof_nodes":self.proof_nodes,
+            "mean_nodes_per_reported_proof_search":ratio(self.proof_nodes,self.proof_searches),
+            "mate_proof_reports":self.mate_proof_reports,
+        })
+    }
+}
+
 #[derive(Default)]
 pub(super) struct PairedScores {
     /// Number of complete pairs scoring 0, 0.5, 1, 1.5, 2 points for A.
@@ -59,6 +128,64 @@ impl PairedScores {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_cost_uses_total_time_and_preserves_absence_and_incomplete_work() {
+        let mut cost = SearchCost::default();
+        let empty = cost.report();
+        assert_eq!(empty["searches"], 0);
+        assert!(empty["completion_fraction"].is_null());
+        assert!(empty["nodes_per_wall_second"].is_null());
+        assert!(empty["max_wall_us"].is_null());
+        assert!(empty["mean_nodes_per_reported_proof_search"].is_null());
+        let mut ply = super::super::runner::tests::fixture().plies.pop().unwrap();
+        ply.score = None;
+        cost.record(&ply, Some(100));
+        assert_eq!(cost.report(), empty);
+        ply.score = Some(0);
+        ply.search_complete = true;
+        ply.nodes = 100;
+        ply.wall_us = 100;
+        ply.reported_us = 90;
+        ply.depth = 4;
+        ply.seldepth = 8;
+        ply.diagnostics.qnodes = 60;
+        ply.diagnostics.tt_hits = 10;
+        ply.diagnostics.proof_nodes = None;
+        ply.diagnostics.mate_proof_plies = None;
+        cost.record(&ply, Some(100));
+        ply.search_complete = false;
+        ply.nodes = 200;
+        ply.wall_us = 300;
+        ply.reported_us = 290;
+        ply.depth = 0;
+        ply.seldepth = 12;
+        ply.diagnostics.qnodes = 120;
+        ply.diagnostics.tt_hits = 20;
+        ply.diagnostics.proof_nodes = Some(0);
+        cost.record(&ply, Some(100));
+        let result = cost.report();
+        assert_eq!(result["searches"], 2);
+        assert_eq!(result["completed_searches"], 1);
+        assert_eq!(result["completion_fraction"], 0.5);
+        assert_eq!(result["nodes_per_wall_second"], 750_000.);
+        assert_eq!(result["wall_us"], 400);
+        assert_eq!(result["reported_us"], 380);
+        assert_eq!(result["mean_wall_us"], 200.);
+        assert_eq!(result["max_wall_us"], 300);
+        assert_eq!(result["time_overruns"], 1);
+        assert_eq!(result["mean_depth_all_searches"], 2.);
+        assert_eq!(result["max_depth"], 4);
+        assert_eq!(result["mean_seldepth_all_searches"], 10.);
+        assert_eq!(result["qnode_fraction"], 0.6);
+        assert_eq!(result["tt_hits_per_node"], 0.1);
+        assert_eq!(result["proof_searches"], 1);
+        assert_eq!(result["mean_nodes_per_reported_proof_search"], 0.);
+        assert_eq!(result["mate_proof_reports"], 0);
+        let mut node_budget = SearchCost::default();
+        node_budget.record(&ply, None);
+        assert_eq!(node_budget.report()["time_overruns"], 0);
+    }
 
     #[test]
     fn both_colors_form_one_score_and_missing_pairs_are_not_draws() {

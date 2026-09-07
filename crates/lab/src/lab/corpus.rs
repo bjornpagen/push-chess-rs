@@ -349,9 +349,14 @@ impl Corpus {
                 .ok_or("unknown run")?;
             relational::config(&frame, &meta)?
         };
-        let (mut games, mut moves, mut analyses, mut complete, mut terminal) =
-            (0u64, 0u64, 0u64, 0u64, 0u64);
-        let (mut wall_us, mut nodes, mut overruns) = (0u64, 0u64, 0u64);
+        let (mut games, mut moves, mut terminal) = (0u64, 0u64, 0u64);
+        let mut cost = super::statistics::SearchCost::default();
+        let mut engine_costs: Vec<_> = config
+            .engines
+            .iter()
+            .map(|_| super::statistics::SearchCost::default())
+            .collect();
+        let budget_us = (config.time_ms > 0).then_some(config.time_ms * 1000);
         let (mut castles, mut transit_anomalies) = (0u64, 0u64);
         let mut transit_examples = Vec::new();
         for index in 0..(config.total_pairs() * 2) as u64 {
@@ -378,21 +383,31 @@ impl Corpus {
             games += 1;
             moves += game.plies.len() as u64;
             terminal += u64::from(game.white_value.is_some());
+            let mut slots = [0; 2];
+            for (side, name) in [&game.white, &game.black].into_iter().enumerate() {
+                slots[side] = config
+                    .engines
+                    .iter()
+                    .position(|n| n == name)
+                    .ok_or("unregistered game engine")?;
+            }
             for p in &game.plies {
-                if p.score.is_some() {
-                    analyses += 1;
-                    complete += u64::from(p.search_complete);
-                    wall_us += p.wall_us as u64;
-                    nodes += p.nodes;
-                    overruns +=
-                        u64::from(config.time_ms > 0 && p.wall_us as u64 > config.time_ms * 1000);
-                }
+                cost.record(p, budget_us);
+                engine_costs[slots[p.side as usize]].record(p, budget_us);
             }
         }
+        let engine_costs: serde_json::Map<_, _> = config
+            .engines
+            .iter()
+            .zip(engine_costs)
+            .map(|(name, cost)| (name.clone(), cost.report()))
+            .collect();
         Ok(
             json!({"run":run,"verified_games":games,"moves":moves,"positions":moves+games,
-            "analyses":analyses,"completed_searches":complete,"terminal_games":terminal,
-            "search_wall_us":wall_us,"search_nodes":nodes,"time_overruns":overruns,
+            "analyses":cost.searches,"completed_searches":cost.complete,"terminal_games":terminal,
+            "search_wall_us":cost.wall_us,"search_nodes":cost.nodes,"time_overruns":cost.overruns,
+            "search_cost":cost.report(),"search_by_engine":engine_costs,
+            "search_cost_note":"Descriptive sums over actual searches, including incomplete searches; openings excluded. Node rates use total measured search time, not campaign elapsed time. Reported q/proof nodes are not time attribution or verified mate certificates.",
             "castling_audit":{"castles":castles,"transit_anomalies":transit_anomalies,
                 "examples":transit_examples,"example_limit":32,
                 "meaning":"Current-rules legal castle whose ordinary one-square king transit is illegal. Warning only; no move/result reclassification."}}),
@@ -586,6 +601,45 @@ mod tests {
         assert_eq!(corpus.summary().unwrap()["totals"]["positions"], 0);
         corpus.close().unwrap();
     }
+
+    #[test]
+    fn search_cost_attributes_observations_to_actual_entrants_after_color_swap() {
+        let (_dir, mut corpus) = create();
+        let mut config = config();
+        config.engines.push("astra".into()); // An unplayed entrant stays empty.
+        let run = corpus.start(&config).unwrap();
+        let mut first = fixture();
+        for p in &mut first.plies {
+            if p.score.is_some() {
+                p.nodes = if p.side == 0 { 10 } else { 20 };
+            }
+        }
+        let mut second = first.clone();
+        second.index = 1;
+        std::mem::swap(&mut second.white, &mut second.black);
+        for p in &mut second.plies {
+            if p.score.is_some() {
+                p.nodes = if p.side == 0 { 70 } else { 40 };
+            }
+        }
+        corpus.save(run, &first).unwrap();
+        corpus.save(run, &second).unwrap();
+        corpus.finish(run, "finished", None).unwrap();
+        let report = corpus.verify(run).unwrap();
+        assert_eq!(report["analyses"], 8);
+        assert_eq!(report["search_nodes"], 280);
+        assert_eq!(report["search_cost"]["nodes"], 280);
+        let engines = &report["search_by_engine"];
+        assert_eq!(engines["cataclysm"]["searches"], 4);
+        assert_eq!(engines["cataclysm"]["nodes"], 100);
+        assert_eq!(engines["kinetic"]["searches"], 4);
+        assert_eq!(engines["kinetic"]["nodes"], 180);
+        assert_eq!(engines["astra"]["searches"], 0);
+        assert!(engines["astra"]["mean_wall_us"].is_null());
+        assert_eq!(report["time_overruns"], 0); // No wall-time limit in this fixture.
+        corpus.close().unwrap();
+    }
+
     #[test]
     fn schema_rejects_mixed_budgets_and_promotion_to_king() {
         let (_dir, corpus) = create();
