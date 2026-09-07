@@ -15,7 +15,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 use sha2::{Digest, Sha256};
 
-pub const RULES_VERSION: &str = "push-chess-history-v1";
+pub use push_chess::core::rules::{RULES_VERSION, Rules};
 
 /// Core generation appends; lab consumers need a replacement set each ply.
 /// Keep that ownership contract in one boundary instead of every caller.
@@ -49,6 +49,7 @@ pub struct Ply {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trajectory {
+    pub rules: Rules,
     pub index: usize,
     pub pair: Option<usize>,
     pub white: String,
@@ -80,7 +81,7 @@ impl Trajectory {
         if self.plies.len() > 4096 || self.pair != Some(self.index / 2) {
             return Err("invalid game identity or length".into());
         }
-        let mut pos = Position::try_from_fen(&self.initial_fen)?;
+        let mut pos = Position::try_from_fen_with_rules(&self.initial_fen, self.rules)?;
         let mut legal = Vec::new();
         let mut audit = ReplayAudit::default();
         for (ply, record) in self.plies.iter().enumerate() {

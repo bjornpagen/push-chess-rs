@@ -13,6 +13,6 @@ pub use search::{
 };
 pub use state::State;
 
-pub const RULES_VERSION: &str = "push-chess-v1-history-castling";
+pub use crate::core::rules::RULES_VERSION;
 pub const ENCODING_VERSION: u32 = 2;
 pub const EFFECT_ENCODING_VERSION: u32 = 1;

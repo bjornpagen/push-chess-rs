@@ -81,6 +81,7 @@ fn piece_to_char(p: Piece) -> char {
 
 #[derive(Clone)]
 pub struct Position {
+    pub rules: super::rules::Rules,
     pub board: [Piece; 64],
     pub side_to_move: Color,
     pub castling_rights: u8,
@@ -95,6 +96,7 @@ pub struct Position {
 impl Default for Position {
     fn default() -> Self {
         Self {
+            rules: super::rules::Rules::default(),
             board: [Piece::default(); 64],
             side_to_move: Color::White,
             castling_rights: 0x0F,
@@ -113,6 +115,7 @@ impl Position {
     /// For callers that construct a rules position explicitly.
     pub fn empty() -> Self {
         Self {
+            rules: super::rules::Rules::default(),
             board: [Piece::default(); 64],
             side_to_move: Color::White,
             castling_rights: 0,
@@ -282,7 +285,7 @@ impl Position {
 
     pub fn compute_zobrist(&mut self) {
         let z = zobrist_tables();
-        self.zobrist = 0;
+        self.zobrist = self.rules.hash_salt();
         for sq in 0..64usize {
             if !self.board[sq].is_empty() {
                 let c = self.board[sq].color as usize;
@@ -542,6 +545,7 @@ impl Position {
     /// A cheap search cursor: copies current board/metadata, not undo history.
     pub fn without_history(&self) -> Self {
         Self {
+            rules: self.rules,
             board: self.board,
             side_to_move: self.side_to_move,
             castling_rights: self.castling_rights,
@@ -557,6 +561,33 @@ impl Position {
     // -------------------------------------------------------------------
     // is_attacked_by
     // -------------------------------------------------------------------
+
+    /// Castling's intermediate state, before the rook moves. Knight capture
+    /// queries require a real target and see blockers on their full push route.
+    /// Final safety is checked after the complete castle, including the rook.
+    pub fn castle_path_safe(&self, from: Square, transit: Square, to: Square) -> bool {
+        let us = self.side_to_move;
+        let them = opponent(us);
+        if self.is_attacked_by(from, them) {
+            return false;
+        }
+        if self.rules == super::rules::Rules::HistoryV1 {
+            return !self.is_attacked_by(transit, them) && !self.is_attacked_by(to, them);
+        }
+        self.king_step_safe(from, transit)
+    }
+
+    /// Boolean witness only: no evaluation, hash, or history is consumed from
+    /// this temporary occupancy. Callers require an empty adjacent target.
+    pub(crate) fn king_step_safe(&self, from: Square, transit: Square) -> bool {
+        debug_assert!(self.board[transit as usize].is_empty());
+        let us = self.side_to_move;
+        let mut view = self.without_history();
+        view.board[from as usize] = Piece::default();
+        view.board[transit as usize] = self.board[from as usize];
+        view.king_sq[us as usize] = transit;
+        !view.in_check_color(us)
+    }
 
     pub fn is_attacked_by(&self, sq: Square, attacker: Color) -> bool {
         // Pawn attacks

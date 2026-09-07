@@ -1,5 +1,6 @@
 //! Opt-in whole-search evidence. Compare saved before/after test executables
 //! in alternating order; do not treat a contended single process as a verdict.
+use push_chess::core::rules::Rules;
 use push_chess::core::{position::Position, types::SearchBudget};
 use push_chess::engines::ENGINE_REGISTRY;
 use push_chess::selfplay::State;
@@ -9,6 +10,11 @@ use std::time::Instant;
 #[test]
 #[ignore = "bounded whole-search measurement; run serially, preferably idle"]
 fn whole_search_cost() {
+    let rules = Rules::parse(
+        &std::env::var("PUSH_CHESS_PROBE_RULES").unwrap_or_else(|_| Rules::HistoryV1.name().into()),
+    )
+    .unwrap();
+    let initial = State::default().position().to_fen();
     let name = std::env::var("PUSH_CHESS_PROBE_ENGINE").unwrap_or_else(|_| "astra".into());
     let entry = ENGINE_REGISTRY
         .iter()
@@ -20,12 +26,12 @@ fn whole_search_cost() {
         "r3k2r/8/8/3pP3/8/8/8/R3K2R w KQkq d6 0 1",
         "7k/8/8/8/3p4/8/4P3/K7 b - - 0 1",
     ]
-    .map(|fen| Position::try_from_fen(fen).unwrap())
+    .map(|fen| Position::try_from_fen_with_rules(fen, rules).unwrap())
     .into();
-    let mut state = State::default();
+    let mut state = State::from_fen_with_rules(&initial, rules).unwrap();
     for ply in 0..128 {
         if state.white_value().is_some() {
-            state = State::default();
+            state = State::from_fen_with_rules(&initial, rules).unwrap();
         }
         if ply % 17 == 0 {
             positions.push(state.position().clone());

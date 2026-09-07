@@ -128,8 +128,28 @@ baseline, both scored by the same deployed native kernel. The zero network is
 only a validation reference, not the training initialization or an installed
 engine. Beating the old residual's loss alone does not beat the no-NNUE baseline.
 
-`--resume` restores optimizer-matched weights for a new seeded pass, not a
-bit-exact replay cursor.
+Training validates the exact exported integer model every 250 steps by default
+(`--validation-interval`) and stops after four non-improving checks (`--patience`).
+It selects the lowest game-balanced held-out loss, including the initial weights;
+the final update is not automatically better. Metadata records the complete
+validation curve, attempted and selected steps, and early stopping. These are
+selection-set measurements, not an independent estimate of playing strength.
+
+`--resume` restores weights, optimizer and random sampler at the same selected
+step, and rejects changed sample digests or batch size. `--init CHECKPOINT`
+explicitly starts a fresh refinement from weights only; it resets optimizer and
+sampler and optionally accepts `--learning-rate`. Use `--init` for older
+checkpoints without a sampler or for an intentional change of data/learning rate.
+Historical v1 NNUE initialization is explicit; unknown rules are rejected.
+
+Core, lab and Python now share `push-chess-history-v2`. Saved v1 corpus games
+still replay with the old rules and unchanged hashes. Their known castling
+transit anomalies are exposed on typed pages; NNUE training excludes entire
+affected games and records their run/game references, without modifying results.
+Other v1 terminal labels retain their source identity: they are historical
+evidence, not re-certified v2 outcomes. Full policy training fails closed on
+non-current rules rather than mixing incompatible legal-action targets.
+
 Export produces the separate 49,280-byte i16 candidate. It does **not** install
 the network, edit the embedded control, or promote it. Require fresh paired
 playing-strength tests at multiple budgets before adopting a candidate.

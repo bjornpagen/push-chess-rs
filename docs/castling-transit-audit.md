@@ -1,5 +1,34 @@
 # Castling through a knight-controlled transit square
 
+## Correction — 2026-09-07
+
+New play now uses `push-chess-history-v2`, shared by core, lab and Python.
+The castling test places the king on its occupied transit square and vacates
+its origin, leaving the rook in place. The normal legal-child filter checks
+the final position after the rook moves. Both knight routes retain the actual
+push blockers; there is no geometric substitute.
+
+Four attacked color/wing cases, four knight-free controls, four blocked-route
+controls, a vacated-origin case and a final-rook-blocker case are regression
+tested against core and specialized search. Rules-specific position hashes
+keep transposition/repetition identities separate; the old hash values are
+unchanged. The historical rules survive copies and full-history reconstruction.
+
+The existing normalized `Run.rules` fact selects replay semantics. No schema
+migration, relabelling, deletion or stored game blob is involved. New saves
+reject game/run rules mismatches. The old nine-game bumbledb regression still
+verifies all v1 castles and reports the same four warnings. Python pages expose
+the warnings as typed run/game-local observations; NNUE sampling excludes
+affected whole games while retaining their original results in the corpus.
+Full policy learning rejects historical rules rather than mixing legal targets.
+
+The rebuilt executable `c36e55384af8578b69ce2be8ec2e25efa219f8368c598b96731905226ed63c9c`
+passed full offline replay of **all 31,230 historical games / 2,364,673 moves**.
+Run 1 retains its one capped game; all other saved games are terminal. Audits
+still report exactly two warnings, both the original Run 2 references below.
+Run 1/2/3/4 audit times were 16.654 / 107.540 / 0.614 / 60.407 seconds on the
+local machine. The original executables, model bytes and game facts remain intact.
+
 ## Confirmed behavior, not a silent rules change
 
 On 2026-09-06 the native rules API accepted castling in all four positions
@@ -60,7 +89,7 @@ native-extension Clippy gates and formatting clean. The production tournament
 executable is unchanged; its recorded SHA256 remains
 `b14e186c181fe92b0d308fecb477e50bce1a2e2e712cde89b7d3ca062ce89320`.
 
-## Next decision
+## Original cutover requirements (now implemented above)
 
 Keep the running executable and rules fixed. Measure the actual corpus's
 exposure before choosing a cutover. A correction needs an explicit new rules

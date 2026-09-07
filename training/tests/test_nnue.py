@@ -246,7 +246,7 @@ def fake_game(index=0, *, length=6, outcome=1, run=2):
     analysis[:,2:4] = 1
     return {"run_id":run, "game_index":index, "white":"cataclysm", "black":"astra", "binary":bytes(32),
             "split":"train", "opening_key":f"train:{index}",
-            "rules":"fixture", "trajectory_key":hashlib.sha256(str(index).encode()).digest(),
+            "rules":"fixture", "castling_transit_anomalies":[], "trajectory_key":hashlib.sha256(str(index).encode()).digest(),
             "white_value":outcome, "analysis":analysis, "in_check":np.zeros(length,bool),
             "nnue_features":ids, "nnue_baselines":baseline}
 
@@ -289,7 +289,7 @@ def test_bounded_training_requires_holdout_and_saves_only_models(monkeypatch, tm
     monkeypatch.setattr(nnue, "games", stream)
     path = tmp_path / "outcome.safetensors"
     info = nnue.train(tmp_path, path, runs=[2], steps=1, batch_size=2, max_games=2, positions_per_game=2, jit=False)
-    assert info["steps"] == 1 and info["training"]["source"] == "bumbledb"
+    assert info["attempted_steps"] == 1 and info["steps"] <= 1 and info["training"]["source"] == "bumbledb"
     assert info["validation"]["split"] == "validation" and not info["promotion_ready"]
     assert info["validation_control"]["games"] == 2
     assert info["validation_handwritten"]["games"] == 2
@@ -317,3 +317,82 @@ def test_zero_network_validation_is_exactly_the_handwritten_control():
     sides = np.array([state.turn() for state in states], np.uint8)
     expected = np.clip(baseline.astype(np.int64) * (1 - 2*sides.astype(np.int64)) + 14, -28000, 28000)
     np.testing.assert_array_equal(nnue.Model(bytes(nnue.MODEL_BYTES)).scores(ids,baseline,sides), expected)
+
+
+def test_castling_affected_games_are_excluded_without_relabeling(monkeypatch, tmp_path):
+    good, affected = fake_game(1), fake_game(2)
+    affected["castling_transit_anomalies"] = [4]
+    def stream(*a, **kw): yield from [good, affected]
+    monkeypatch.setattr(nnue, "games", stream)
+    data = nnue.dataset(tmp_path, runs=[2], split="train")
+    assert data.provenance["retained_games"] == 1
+    assert data.provenance["excluded_castling_games"] == [(2,2)]
+    assert affected["white_value"] == 1
+
+
+def training_fixture(path, split, **kw):
+    for index, value in [(1,1), (2,-1)]:
+        game = fake_game(index, outcome=value)
+        game.update(split=split, opening_key=f"{split}:{index}")
+        yield game
+
+
+def test_resume_preserves_sampling_and_rejects_changed_data(monkeypatch, tmp_path):
+    monkeypatch.setattr(nnue, "games", training_fixture)
+    calls = 0
+    def improving(*a, **kw):
+        nonlocal calls
+        calls += 1
+        return {"loss": 1 - calls/100, "games": 2, "positions": 4}
+    monkeypatch.setattr(nnue, "evaluate", improving)
+    options = dict(runs=[2],batch_size=2,max_games=2,positions_per_game=2,validation_interval=1,jit=False,device="CPU")
+    full, first, second = [tmp_path/name for name in ("full.safetensors","first.safetensors","second.safetensors")]
+    nnue.train(tmp_path,full,steps=4,**options)
+    nnue.train(tmp_path,first,steps=2,**options)
+    nnue.train(tmp_path,second,steps=2,resume=first,**options)
+    a, ai = nnue.load(full,training=True,device="CPU")
+    b, bi = nnue.load(second,training=True,device="CPU")
+    assert a.steps == b.steps == 4 and ai["sampler_state"] == bi["sampler_state"]
+    for key in nnue.SCALES:
+        np.testing.assert_array_equal(getattr(a.model,key).numpy(),getattr(b.model,key).numpy())
+    for key, tensor in nnue.optimizer_state(a.optimizer).items():
+        np.testing.assert_array_equal(tensor.numpy(),nnue.optimizer_state(b.optimizer)[key].numpy())
+    with pytest.raises(ValueError,match="dataset/sampler mismatch"):
+        nnue.train(tmp_path,tmp_path/"bad.safetensors",steps=1,resume=first,seed=7,**options)
+    with pytest.raises(ValueError,match="use init"):
+        nnue.train(tmp_path,tmp_path/"bad.safetensors",steps=1,resume=first,learning_rate=.01,**options)
+
+
+def test_early_stop_restores_best_weights_optimizer_and_sampler(monkeypatch, tmp_path):
+    monkeypatch.setattr(nnue, "games", training_fixture)
+    losses = iter([.4,.4,.4,.3,.32,.34,.3])
+    monkeypatch.setattr(nnue, "evaluate", lambda *a, **kw: {"loss":next(losses),"games":2,"positions":4})
+    path = tmp_path/"selected.safetensors"
+    options = dict(runs=[2],batch_size=2,max_games=2,positions_per_game=2,validation_interval=1,jit=False,device="CPU")
+    info = nnue.train(tmp_path,path,steps=10,patience=2,**options)
+    assert info["steps"] == 1 and info["attempted_steps"] == 3 and info["early_stopped"]
+    assert info["validation_after"]["loss"] == .3
+    learner, _ = nnue.load(path,training=True,device="CPU")
+    source = nnue.dataset(tmp_path,runs=[2],split="train",max_games=2,positions_per_game=2)
+    expected, rng = nnue.Learner(nnue.Model(device="CPU"),jit=False), np.random.default_rng(1)
+    expected.train(source.batch(rng,2))
+    assert info["sampler_state"] == rng.bit_generator.state
+    for key in nnue.SCALES:
+        np.testing.assert_array_equal(getattr(learner.model,key).numpy(),getattr(expected.model,key).numpy())
+    for key, tensor in nnue.optimizer_state(learner.optimizer).items():
+        np.testing.assert_array_equal(tensor.numpy(),nnue.optimizer_state(expected.optimizer)[key].numpy())
+
+
+def test_historical_nnue_initialization_is_explicit(tmp_path):
+    from tinygrad.nn.state import safe_load, safe_load_metadata, safe_save
+    import json
+    path = tmp_path/"old.safetensors"
+    nnue.save(path,nnue.Learner(nnue.Model(device="CPU")),{})
+    metadata = safe_load_metadata(str(path))[2]["__metadata__"]
+    info = json.loads(metadata["nnue"])
+    info["rules"] = "push-chess-v1-history-castling"
+    old = tmp_path/"historical.safetensors"
+    safe_save(safe_load(str(path)),str(old),metadata={"nnue":json.dumps(info)})
+    with pytest.raises(ValueError,match="rules/format"): nnue.load(old)
+    restored, provenance = nnue.load(old,allow_historical=True)
+    assert restored.export() == NNUE_CONTROL and provenance["rules"] == info["rules"]

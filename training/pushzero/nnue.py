@@ -5,6 +5,7 @@ deduplication digest set scales with scanned source games. Only weights,
 optimizer state and training provenance may become file artifacts.
 """
 from dataclasses import dataclass
+import copy
 import hashlib
 import importlib.metadata
 import json
@@ -199,7 +200,7 @@ def dataset(path, *, runs, split, max_games=10000, positions_per_game=16, seed=1
     if not 1 <= max_games <= 100000 or not 1 <= positions_per_game <= 64:
         raise ValueError("bounded positive game/position limits required")
     rng, retained, seen, scanned = np.random.default_rng(seed), [], 0, 0
-    duplicates, trajectories, identities = 0, set(), set()
+    duplicates, trajectories, identities, excluded = 0, set(), set(), []
     stream = games(path, split, nnue=True, runs=runs)
     try:
         for game in stream:
@@ -207,6 +208,11 @@ def dataset(path, *, runs, split, max_games=10000, positions_per_game=16, seed=1
             if game["split"] != split: raise ValueError("corpus split mismatch")
             scanned += 1
             if game["white_value"] is None: continue
+            # Preserve the historical facts, but do not teach from outcomes of
+            # games known to have crossed a newly-illegal castling transit.
+            if game["castling_transit_anomalies"]:
+                excluded.append((game["run_id"], game["game_index"]))
+                continue
             if game["trajectory_key"] in trajectories:
                 duplicates += 1
                 continue
@@ -239,6 +245,7 @@ def dataset(path, *, runs, split, max_games=10000, positions_per_game=16, seed=1
             "retained_positions": len(ids), "duplicate_trajectories": duplicates, "seed": seed,
             "max_games": max_games, "positions_per_game": positions_per_game,
             "sample_sha256": digest.hexdigest(), "identities": sorted(identities),
+            "excluded_castling_games": excluded,
             "targets": "terminal expected score; completed non-check roots; abs(search score)<28000"}
     return Dataset(ids, baselines, sides, targets, offsets, info, frozenset(row[5] for row in retained))
 
@@ -271,9 +278,11 @@ def save(path, learner, metadata):
     return info
 
 
-def load(path, *, training=False, jit=True, device=None):
+def load(path, *, training=False, jit=True, device=None, allow_historical=False):
     info = json.loads(safe_load_metadata(str(path))[2]["__metadata__"]["nnue"])
-    if info.get("format") != FORMAT or info.get("rules") != RULES_VERSION:
+    compatible = info.get("rules") == RULES_VERSION or (allow_historical and
+        info.get("rules") in ("push-chess-history-v1", "push-chess-v1-history-castling"))
+    if info.get("format") != FORMAT or not compatible:
         raise ValueError("NNUE checkpoint rules/format mismatch")
     if info.get("tinygrad") != importlib.metadata.version("tinygrad"):
         raise ValueError("NNUE checkpoint tinygrad differs from pinned runtime")
@@ -293,35 +302,87 @@ def load(path, *, training=False, jit=True, device=None):
     return learner, info
 
 
+def _snapshot(learner, rng):
+    tensors = {"model." + k: v for k, v in get_state_dict(learner.model).items()}
+    tensors.update({"optimizer." + k: v for k, v in optimizer_state(learner.optimizer).items()})
+    return ({k: v.numpy().copy() for k, v in tensors.items()}, learner.steps, copy.deepcopy(rng.bit_generator.state))
+
+
+def _restore(learner, rng, saved):
+    tensors = {"model." + k: v for k, v in get_state_dict(learner.model).items()}
+    tensors.update({"optimizer." + k: v for k, v in optimizer_state(learner.optimizer).items()})
+    for key, tensor in tensors.items(): tensor.assign(Tensor(saved[0][key], device=tensor.device)).realize()
+    learner.steps, rng.bit_generator.state = saved[1], copy.deepcopy(saved[2])
+
+
 def train(db, output, *, runs, steps=1000, batch_size=256, max_games=10000, validation_games=2000,
-          positions_per_game=16, seed=1, resume=None, jit=True, device=None):
+          positions_per_game=16, seed=1, resume=None, init=None, learning_rate=None,
+          validation_interval=250, patience=4, jit=True, device=None):
     if Path(output).exists(): raise FileExistsError(output)
     if not 1 <= steps <= 1000000 or not 1 <= batch_size <= 4096: raise ValueError("bounded positive step/batch limits required")
+    if not 1 <= validation_interval <= 1000000 or not 1 <= patience <= 1000:
+        raise ValueError("bounded positive validation interval and patience required")
+    if resume and (init or learning_rate is not None): raise ValueError("resume preserves optimizer; use init for a fresh refinement")
+    if learning_rate is not None and (not np.isfinite(learning_rate) or learning_rate <= 0):
+        raise ValueError("positive finite learning rate required")
     Tensor.manual_seed(seed)
+    print({"nnue_loading": "train", "runs": runs}, flush=True)
     source = dataset(db, runs=runs, split="train", max_games=max_games, positions_per_game=positions_per_game, seed=seed)
+    print({"nnue_loading": "validation", "training_games": len(source.offsets)-1}, flush=True)
     validation = dataset(db, runs=runs, split="validation", max_games=validation_games, positions_per_game=positions_per_game, seed=seed)
     if source.opening_families & validation.opening_families:
         raise ValueError("training and validation opening families overlap")
-    learner = load(resume, training=True, jit=jit, device=device)[0] if resume else Learner(Model(device=device),jit=jit)
+    rng = np.random.default_rng(seed)
+    if resume:
+        learner, prior = load(resume, training=True, jit=jit, device=device)
+        if (prior.get("sampler_state") is None or prior.get("batch_size") != batch_size or
+            any(prior[split]["sample_sha256"] != data.provenance["sample_sha256"]
+                for split, data in (("training", source), ("validation", validation)))):
+            raise ValueError("resume dataset/sampler mismatch; use init for a fresh refinement")
+        rng.bit_generator.state = prior["sampler_state"]
+    else:
+        model = load(init, device=device, allow_historical=True)[0] if init else Model(device=device)
+        learner = Learner(model, lr=learning_rate if learning_rate is not None else 1e-3, jit=jit)
     before = evaluate(learner.model, validation, learner.score_scale)
     control = evaluate(Model(device=device), validation, learner.score_scale)
     handwritten = evaluate(Model(bytes(MODEL_BYTES), device=device), validation, learner.score_scale)
-    stopped, rng, started, metrics = False, np.random.default_rng(seed), time.monotonic(), {}
+    stopped, started, metrics = False, time.monotonic(), {}
+    best, best_result, stale = _snapshot(learner, rng), before, 0
+    history = [{"steps": learner.steps, **before}]
+    attempted = 0
     def stop(*_):
         nonlocal stopped
         stopped = True
     handlers = {s: signal.signal(s, stop) for s in (signal.SIGINT, signal.SIGTERM)}
     try:
-        for _ in range(steps):
+        for iteration in range(steps):
             if stopped: break
             metrics = learner.train(source.batch(rng, batch_size))
+            attempted += 1
             if learner.steps % 25 == 0: print({"nnue_steps": learner.steps, **metrics}, flush=True)
+            if (iteration + 1) % validation_interval == 0 or iteration + 1 == steps:
+                result = evaluate(learner.model, validation, learner.score_scale)
+                history.append({"steps": learner.steps, **result})
+                print({"nnue_validation": history[-1]}, flush=True)
+                if result["loss"] < best_result["loss"]:
+                    best, best_result, stale = _snapshot(learner, rng), result, 0
+                else: stale += 1
+                if stale >= patience: break
     finally:
         for s, handler in handlers.items(): signal.signal(s, handler)
+    # Keep weights, optimizer and sampler at the same selected step. An
+    # interrupted, unevaluated tail cannot silently become the candidate.
+    _restore(learner, rng, best)
     after = evaluate(learner.model, validation, learner.score_scale)
+    parent = resume or init
     return save(output, learner, {"training": source.provenance, "validation": validation.provenance,
-        "parent": str(resume) if resume else None, "parent_sha256": hashlib.sha256(Path(resume).read_bytes()).hexdigest() if resume else None,
-        "seconds": time.monotonic()-started, "interrupted": stopped, "metrics": metrics,
+        "parent": str(parent) if parent else None, "parent_sha256": hashlib.sha256(Path(parent).read_bytes()).hexdigest() if parent else None,
+        "initialization": "resume" if resume else "weights" if init else "embedded",
+        "batch_size": batch_size, "sampler_state": rng.bit_generator.state,
+        "attempted_steps": attempted, "validation_interval": validation_interval, "patience": patience,
+        "early_stopped": stale >= patience, "validation_history": history,
+        "selection": "lowest game-balanced exact-export validation loss, including initial weights",
+        "seconds": time.monotonic()-started, "interrupted": stopped, "last_attempt_metrics": metrics,
         "training_device": learner.model.features.device,
         "validation_before": before, "validation_after": after, "validation_control": control,
         "validation_handwritten": handwritten, "promotion_ready": False})

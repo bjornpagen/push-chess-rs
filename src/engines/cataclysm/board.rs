@@ -156,6 +156,7 @@ impl Board<Handwritten> {
 impl<R: Residual> Board<R> {
     pub fn with_residual(pos: &Position, net: R) -> Self {
         let mut view = Position::empty();
+        view.rules = pos.rules;
         view.board = pos.board;
         view.side_to_move = pos.side_to_move;
         view.castling_rights = pos.castling_rights;
@@ -244,6 +245,14 @@ impl<R: Residual> Board<R> {
             let Some(to) = step(from, dr, df) else {
                 continue;
             };
+            if self.pos.board[to as usize].is_empty() {
+                // A stalemate witness needs only king safety. Avoid updating
+                // and snapshotting evaluation/NNUE state for this empty step.
+                if self.pos.king_step_safe(from, to) {
+                    return true;
+                }
+                continue;
+            }
             let Some(plan) = resolve_push(&self.pos, from, to, dr, df) else {
                 continue;
             };
@@ -487,9 +496,7 @@ impl<R: Residual> Board<R> {
                                 && spaces
                                     .iter()
                                     .all(|&s| self.pos.board[s as usize].is_empty())
-                                && !self.pos.is_attacked_by(from, opponent(us))
-                                && !self.pos.is_attacked_by(transit, opponent(us))
-                                && !self.pos.is_attacked_by(to, opponent(us))
+                                && self.pos.castle_path_safe(from, transit, to)
                             {
                                 self.append(
                                     out,

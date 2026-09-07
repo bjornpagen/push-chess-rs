@@ -4,5 +4,6 @@ pub mod movegen;
 pub mod position;
 pub mod prepared;
 pub mod push;
+pub mod rules;
 pub mod types;
 pub mod zobrist;

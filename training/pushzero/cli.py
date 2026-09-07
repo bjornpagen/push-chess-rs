@@ -55,10 +55,13 @@ def main(argv=None):
     residual.add_argument("--runs", nargs="+", type=int, required=True, help="explicit sealed source run IDs")
     residual.add_argument("--output", type=Path, required=True, help="new candidate checkpoint, never the engine control")
     residual.add_argument("--resume", type=Path)
+    residual.add_argument("--init", type=Path, help="initialize weights, resetting optimizer and sampler; allows historical NNUE")
+    residual.add_argument("--learning-rate", type=float)
     residual.add_argument("--no-jit", action="store_true")
     residual.add_argument("--device", choices=("CPU","METAL"), help="explicit training backend; default is DEV (normally METAL)")
     for name, default in (("steps",1000),("batch-size",256),("max-games",10000),
-                          ("validation-games",2000),("positions-per-game",16),("seed",1)):
+                          ("validation-games",2000),("positions-per-game",16),("seed",1),
+                          ("validation-interval",250),("patience",4)):
         residual.add_argument("--"+name, type=int, default=default)
     exporter = residual_commands.add_parser("export", help="export exact i16 weights; does not install them")
     exporter.add_argument("checkpoint", type=Path)
@@ -78,7 +81,8 @@ def main(argv=None):
             from .nnue import train
             result = train(args.db,args.output,runs=args.runs,steps=args.steps,batch_size=args.batch_size,
                 max_games=args.max_games,validation_games=args.validation_games,positions_per_game=args.positions_per_game,
-                seed=args.seed,resume=args.resume,jit=not args.no_jit,device=args.device)
+                seed=args.seed,resume=args.resume,init=args.init,learning_rate=args.learning_rate,
+                validation_interval=args.validation_interval,patience=args.patience,jit=not args.no_jit,device=args.device)
         elif args.nnue_command == "export":
             from .nnue import export
             result = export(args.checkpoint,args.output)

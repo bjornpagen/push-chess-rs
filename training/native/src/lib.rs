@@ -4,6 +4,7 @@ use numpy::{
     IntoPyArray, PyArray1, PyArray2, PyArray3, PyArray4, PyReadonlyArray1, PyReadonlyArray2,
     PyReadonlyArray3, PyUntypedArrayMethods, ndarray::Array,
 };
+use push_chess::core::rules::Rules;
 use push_chess::core::types::{Color, SearchBudget};
 use push_chess::engines::cataclysm::Model;
 use push_chess::engines::cataclysm::learning as nnue;
@@ -243,14 +244,22 @@ struct State {
 #[pymethods]
 impl State {
     #[new]
-    #[pyo3(signature = (fen=None))]
-    fn new(fen: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (fen=None, *, rules=selfplay::RULES_VERSION))]
+    fn new(fen: Option<&str>, rules: &str) -> PyResult<Self> {
+        let rules = Rules::parse(rules).map_err(PyValueError::new_err)?;
+        if fen.is_none() && rules == Rules::default() {
+            return Ok(Self {
+                inner: selfplay::State::default(),
+            });
+        }
+        let initial = push_chess::core::position::start_position().to_fen();
         Ok(Self {
-            inner: match fen {
-                Some(f) => selfplay::State::from_fen(f).map_err(PyValueError::new_err)?,
-                None => selfplay::State::default(),
-            },
+            inner: selfplay::State::from_fen_with_rules(fen.unwrap_or(&initial), rules)
+                .map_err(PyValueError::new_err)?,
         })
+    }
+    fn rules(&self) -> &'static str {
+        self.inner.position().rules.name()
     }
     fn copy(&self) -> Self {
         self.clone()
@@ -813,9 +822,13 @@ impl CorpusReader {
         for game in page.games {
             let g = game.trajectory;
             let row = pyo3::types::PyDict::new(py);
+            row.set_item(
+                "castling_transit_anomalies",
+                game.audit.castling_transit_anomalies,
+            )?;
             if nnue {
-                let mut state =
-                    selfplay::State::from_fen(&g.initial_fen).map_err(PyValueError::new_err)?;
+                let mut state = selfplay::State::from_fen_with_rules(&g.initial_fen, g.rules)
+                    .map_err(PyValueError::new_err)?;
                 let mut rows = Vec::with_capacity(g.plies.len());
                 let mut check = Vec::with_capacity(g.plies.len());
                 for ply in &g.plies {
@@ -927,7 +940,10 @@ impl CorpusReader {
             return Err(PyValueError::new_err("ply beyond saved game"));
         }
         py.detach(move || -> Result<State, String> {
-            let mut state = selfplay::State::from_fen(&game.trajectory.initial_fen)?;
+            let mut state = selfplay::State::from_fen_with_rules(
+                &game.trajectory.initial_fen,
+                game.trajectory.rules,
+            )?;
             for record in game.trajectory.plies.iter().take(ply) {
                 state.play(record.action)?;
             }

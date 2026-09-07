@@ -21,7 +21,13 @@ impl Default for State {
 
 impl State {
     pub fn from_fen(fen: &str) -> Result<Self, String> {
-        Position::try_from_fen(fen)
+        Self::from_fen_with_rules(fen, crate::core::rules::Rules::default())
+    }
+    pub fn from_fen_with_rules(
+        fen: &str,
+        rules: crate::core::rules::Rules,
+    ) -> Result<Self, String> {
+        Position::try_from_fen_with_rules(fen, rules)
             .map(Self::from_position)
             .map_err(|e| e.to_string())
     }

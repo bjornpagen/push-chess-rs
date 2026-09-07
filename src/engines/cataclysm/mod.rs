@@ -910,6 +910,18 @@ where
     if ours != theirs {
         return Err(format!("move set mismatch: {}", pos.to_fen()));
     }
+    let mut legal = Vec::new();
+    generate_legal_moves(&mut pos.clone(), &mut legal);
+    if board.has_legal_move() != !legal.is_empty() {
+        return Err(format!("stalemate witness mismatch: {}", pos.to_fen()));
+    }
+    let rebuilt = Board::with_residual(pos, residual);
+    if board.pos.to_fen() != pos.to_fen()
+        || board.pos.zobrist != pos.zobrist
+        || board.net.snapshot() != rebuilt.net.snapshot()
+    {
+        return Err("stalemate witness mutated search state".into());
+    }
     for action in &actions {
         let mut reference = pos.clone();
         reference.make_move(&action.mv);

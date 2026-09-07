@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import numpy as np
 import pytest
-from pushzero._native import CorpusReader, State
+from pushzero._native import CorpusReader, State, RULES_VERSION
 from pushzero.corpus import games, samples, replay
 
 
@@ -40,6 +40,8 @@ def test_native_game_pages_have_owned_arrays_and_exact_targets(corpus):
     assert len(all_games) == 6
     assert sum(len(g["moves"]) for g in all_games) == totals["moves"]
     for game in all_games:
+        assert game["rules"] == RULES_VERSION == "push-chess-history-v2"
+        assert game["castling_transit_anomalies"] == []
         assert game["moves"].dtype == np.uint32
         assert game["analysis"].shape == (len(game["moves"]),6)
         assert isinstance(game["trajectory_key"], bytes)
@@ -66,6 +68,18 @@ def test_teacher_pretraining_keeps_only_tensor_checkpoint_artifacts(corpus, tmp_
     assert restored["steps"] == 1
     assert not list(tmp_path.rglob("*.npz"))
     with pytest.raises(FileExistsError): train(corpus,path,steps=1)
+
+
+def test_historical_rules_are_explicit_and_policy_training_fails_closed():
+    fen = "k7/8/8/8/8/8/7n/4K2R w K - 0 1"
+    old = State(fen,rules="push-chess-history-v1")
+    new = State(fen)
+    castle = 4 | (6 << 6) | (1 << 18)
+    assert castle in old.legal_ids() and castle not in new.legal_ids()
+    assert old.copy().rules() == "push-chess-history-v1" and new.rules() == RULES_VERSION
+    assert State(fen,rules="push-chess-v1-history-castling").rules() == old.rules()
+    with pytest.raises(ValueError,match="unknown rules"): State(fen,rules="unknown")
+    with pytest.raises(ValueError,match="current-rules"): samples({"rules":old.rules()})
 
 
 def test_nnue_page_features_are_owned_and_match_exact_replay(corpus):
@@ -117,11 +131,11 @@ def test_nnue_training_from_real_terminal_relations(tmp_path):
     path = tmp_path / "outcome.safetensors"
     info = train(db, path, runs=[1], steps=1, batch_size=4, max_games=8, validation_games=4,
                  positions_per_game=2, jit=False)
-    assert info["steps"] == 1 and info["validation_control"]["games"] > 0
+    assert info["attempted_steps"] == 1 and info["steps"] <= 1 and info["validation_control"]["games"] > 0
     assert info["training"]["split"] == "train" and info["validation"]["split"] == "validation"
     assert info["training"]["retained_positions"] <= 16
     learner, restored = load(path, training=True, jit=False)
-    assert learner.steps == 1 and restored["export_sha256"] == info["export_sha256"]
+    assert learner.steps == info["steps"] and restored["export_sha256"] == info["export_sha256"]
     export(path, tmp_path / "candidate.bin")
     assert sorted(p.name for p in tmp_path.iterdir()) == ["candidate.bin", "outcome.safetensors", "terminal-corpus"]
 

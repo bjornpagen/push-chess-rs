@@ -70,6 +70,43 @@ saved pre-refactor executable, then repeat interleaved controls. No root cause
 has yet been established. Correctness is verified; control-neutral performance
 is not. Keep all identities explicit and start no tournament to validate it.
 
+### Cleanup follow-up: measure against both saved baselines
+
+After the historical-corpus audits, with no build, training, audit or chess
+search competing, ran 11 alternating-order repetitions of nine arms:
+old / prior Granite-refactor / cleaned Cataclysm / old Cataclysm, then
+old / prior / cleaned Abacus / cleaned Granite / old Abacus. Each process
+still warmed once and measured twice; all 99 processes matched the original
+node counts and fingerprints. Ordinary desktop activity was not suppressed.
+
+| Profile | Old ms | Prior refactor ms | Cleaned ms | Old repeat ms | Cleaned / bracketed old |
+|---|---:|---:|---:|---:|---:|
+| Cataclysm | 96.838 | 98.584 | 96.677 | 95.926 | 1.0066 |
+| Abacus | 91.272 | 94.977 | 92.919 | 91.749 | 1.0222 |
+| Granite vs Abacus | 91.272 | — | 86.291 | 91.749 | 0.9491 |
+
+Median within-repetition cleaned/prior ratios were **0.9805 Cataclysm and
+0.9733 Abacus**. Retained changes: compile-time piece-square tables (no lazy
+initialization guard per lookup) and an empty-king-step stalemate witness that
+does not update/snapshot NNUE state. The witness is checked against full legal
+generation and state restoration throughout the differential fixture suite.
+
+Flattening the neural board storage and adding inlining hints did not reliably
+recover the cost; those speculative changes were discarded. These results
+support a modest improvement over the immediate pre-cleanup source, **not a
+claim that the original shared-refactor regression is entirely eliminated**.
+Remaining cleaned/old differences are +0.66% / +2.22%, with respective ranges
+-2.38–9.28% / -7.76–4.95%. Desktop variation and code layout remain plausible
+contributors; no unique root cause has been established. Do not hide this
+limitation by comparing Granite only to the newer, slower Abacus.
+
+Cleaned harness: `data/bin/search-cost-2f81801a094c2c73`, SHA256
+`2f81801a094c2c739ae65f78844fb81cd78fe7ef69904c3f9de321dc8824ee73`.
+The default harness explicitly uses v1 rules to preserve the old mechanism
+gate. `PUSH_CHESS_PROBE_RULES=push-chess-history-v2` selects current play, but
+its changed rules/hash namespace is not a behavior-preserving comparison to
+the old executable. All 17 built-in profile fingerprints remain pinned under v1.
+
 ## Protocol
 
 `tests/search_cost.rs` is an ignored, bounded measurement harness, not a playing

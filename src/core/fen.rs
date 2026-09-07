@@ -14,6 +14,16 @@ impl fmt::Display for FenError {
 impl std::error::Error for FenError {}
 
 impl Position {
+    pub fn try_from_fen_with_rules(
+        fen: &str,
+        rules: super::rules::Rules,
+    ) -> Result<Self, FenError> {
+        let mut pos = Self::try_from_fen(fen)?;
+        pos.rules = rules;
+        pos.compute_zobrist();
+        Ok(pos)
+    }
+
     /// Validated public boundary. The trusted parser remains available to the
     /// historical differential tests, which intentionally use synthetic boards.
     pub fn try_from_fen(fen: &str) -> Result<Self, FenError> {

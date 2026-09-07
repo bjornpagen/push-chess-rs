@@ -6,17 +6,20 @@ commit and push verified implementation.
 
 ## Current authorization — 2026-09-07
 
-**Run 4 is finished and audited. Do not start another tournament.**
-This includes arena comparisons, smoke rounds, and self-play or
-match campaigns. The user's latest instruction supersedes the older repeated
-tournament protocol below; a new campaign requires explicit reauthorization.
+**Run 4 is finished and audited. No new engines or large tournaments.**
+The user has now authorized cleanup, bug fixes and bounded NNUE refinement,
+followed by committing and pushing verified code on main, then a small paired
+before/after NNUE comparison. Use the same executable/search for both weight
+versions, preserve the controls and record every game in bumbledb. This does
+not authorize resuming the older broad or repeated tournament protocol.
 
 Continue improving this generation through code review, regression tests,
 measured optimizations, exact-history failure analysis, and bounded NNUE
 refinement from audited, sealed corpus runs. Ordinary automated tests use only
 disposable fixtures, never the live corpus. Arena games remain held out from
 training. Benchmark speed and prediction loss do not establish playing strength;
-record untested candidates without starting games to validate them.
+record untested candidates honestly; only the bounded NNUE comparison above is
+newly authorized.
 
 The previous conversation, `Find best push chess model`, failed because its
 provider rejected continuation of that session. Work resumed in task
@@ -81,7 +84,9 @@ Next bounded steps:
    loss establishes strength.
 2. Run 4's five-entrant comparison is complete and audited. Continue inspecting
    saved wins and losses and bounded exact-history analyses, then improve the
-   models without another arena. The first actual review is Run 4/game 12;
+   models. The newly authorized small NNUE comparison is specified in
+   [nnue-round-3.md](nnue-round-3.md); no broader arena is authorized.
+   The first actual review is Run 4/game 12;
    its route-sensitive knight move and defensive fork are investigation targets.
 3. Finish the Granite representation experiment: Abacus still updates and
    snapshots 256 accumulator bytes even though it discards their score;
@@ -92,7 +97,7 @@ Next bounded steps:
    fixture harness, but the shared refactor added about 2–3% to the existing
    controls' search time. Investigate this regression against the preserved
    baseline before declaring the optimization complete; see search-cost.md.
-   Do not run wall-time games or equate a faster benchmark with stronger play.
+   Do not run Granite wall-time games or equate a faster benchmark with stronger play.
 
 ## Historical round protocol — not authorized for another run
 

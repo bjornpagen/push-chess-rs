@@ -353,8 +353,6 @@ fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut impl MoveSi
         return;
     }
 
-    let them = opponent(us);
-
     // Kingside
     let ks_flag: u8 = if us == Color::White {
         CASTLE_WK
@@ -366,9 +364,7 @@ fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut impl MoveSi
         let g_sq = make_square(castle_rank, 6);
         if pos.board[f_sq as usize].is_empty()
             && pos.board[g_sq as usize].is_empty()
-            && !pos.is_attacked_by(from, them)
-            && !pos.is_attacked_by(f_sq, them)
-            && !pos.is_attacked_by(g_sq, them)
+            && pos.castle_path_safe(from, f_sq, g_sq)
         {
             out.emit(
                 Move {
@@ -397,9 +393,7 @@ fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut impl MoveSi
         if pos.board[d_sq as usize].is_empty()
             && pos.board[c_sq as usize].is_empty()
             && pos.board[b_sq as usize].is_empty()
-            && !pos.is_attacked_by(from, them)
-            && !pos.is_attacked_by(d_sq, them)
-            && !pos.is_attacked_by(c_sq, them)
+            && pos.castle_path_safe(from, d_sq, c_sq)
         {
             out.emit(
                 Move {
