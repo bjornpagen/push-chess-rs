@@ -660,6 +660,9 @@ impl<const V: usize> Engine for Search<V> {
         self.history.fill(0);
         self.killers.fill([0; 2]);
         self.counters.fill(0);
+        // Counter-move lookup consults per-ply action context in tactical
+        // search too. An old game's context must not survive its cleared table.
+        self.previous.fill(0);
         self.path.clear();
     }
     fn choose_move(&mut self, pos: &mut Position, budget: &SearchBudget) -> (Move, SearchStats) {
@@ -935,6 +938,41 @@ mod tests {
         assert!(stats.nodes <= 2000);
         assert_eq!(pos.to_fen(), before);
         assert!(pos.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn new_game_discards_prior_action_context() {
+        let mut engine = Search::<7>::new();
+        let observe = |engine: &mut Search<7>| {
+            let mut pos =
+                Position::try_from_fen("r3k2r/8/8/3pP3/8/8/8/R3K2R w KQkq d6 0 1").unwrap();
+            let (mv, stats) = engine.choose_move(
+                &mut pos,
+                &SearchBudget {
+                    max_nodes: 8192,
+                    ..SearchBudget::default()
+                },
+            );
+            (
+                mv,
+                stats.nodes,
+                stats.depth_reached,
+                stats.seldepth,
+                stats.eval_cp,
+                stats.diagnostics,
+                stats.pv,
+            )
+        };
+        engine.new_game(Color::White, 0);
+        let expected = observe(&mut engine);
+        // Valid counter-table indices that could be left by other games.
+        // Deliberately poison every ply, not just those this fixture reaches.
+        for previous in [1, 127, 895] {
+            engine.previous.fill(previous);
+            engine.new_game(Color::White, 0);
+            assert!(engine.previous.iter().all(|&index| index == 0));
+            assert_eq!(observe(&mut engine), expected);
+        }
     }
 
     #[test]

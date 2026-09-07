@@ -34,7 +34,7 @@ reported process time averages its two measured passes. This discipline follows
 bumblebench's insistence on actual code, interleaved controls, and working-set
 costs instead of assuming that eliminating computation must help.
 
-Baseline: `b2b3445` plus this unchanged test harness. Saved baseline executable
+Baseline: `b2b3445` plus the harness committed in `45794b2`. Saved baseline executable
 SHA256: `66d56bcd83e2f39e440f37dccbaf7ab857b878717394c0ef3b1930edbbf37a00`.
 
 ## Rejected: retaining every Astra push transaction
@@ -117,3 +117,63 @@ Table-candidate executable SHA256:
 The running corpus executable is unchanged. These mechanism-only changes
 belong to the next committed executable, with fresh wall-time arenas still
 required to measure their value in play.
+
+## The reset guard caught a pre-existing state leak
+
+When the whole-search harness was extended to Cataclysm-family comparisons,
+Synthesis failed its within-process repeatability check in **both** the unchanged
+baseline and a candidate. Per-root diagnostics isolated root 2:
+
+`r3k2r/8/8/3pP3/8/8/8/R3K2R w KQkq d6 0 1`
+
+At 8,192 nodes, the selected a1–a8 move, depth 5, selective depth 16, score
+1,368, 5,710 quiescence nodes, 682 proof nodes and entire PV were identical.
+TT hits differed: 651 in the first pass, 650 in the next. This was repeatable,
+not clock noise. The benchmark now reports the exact root and full non-clock
+signature when this guard fails, instead of only an aggregate hash.
+
+`new_game` cleared history, killers and the counter-move table but retained
+the `previous` per-ply action-context array. Tactical move ordering can consult
+that context after the new game has populated counters, admitting prior-game
+state into its choices. Clearing **only that array** at the existing reset
+boundary made the original failing run repeatable again, with the first-pass
+fingerprint `5652312666527311164`. All eight Cataclysm-family profiles then
+passed the same 12-root, three-pass repeatability check.
+
+A normal unit test deliberately poisons every slot with several valid prior
+context indices, calls `new_game`, and requires cleared context plus identical
+8,192-node search observations. This is an intentional cross-game state fix,
+not a reason to relax fingerprint checks. The existing 2,048-node all-profile
+fingerprints are not edited to hide it.
+
+Within-search tactical/NULL parent-context handling deserves a separate search
+experiment: explicit edge context could replace the scratch array entirely.
+Do not mix that behavior change into a purported mechanism-only refactor.
+
+The current tournament's binary remains fixed. Its saved moves and outcomes
+are still the actual legal game facts; this discovery does not justify deleting
+the corpus. Treat that run as exploratory and use fresh arenas for the repaired
+implementation. A reset fix is not itself evidence of greater playing strength.
+
+## Pending, not deployed: single-pass ray resolution
+
+The next candidate scans each slider ray once. Before the first enemy/boundary,
+the k-th empty square completes the non-capturing transaction for destination k:
+with k empties and f friendly pieces in that prefix, its length is k+f, so
+the f friends exactly fill the f slots after the destination. Capturing the
+first enemy is possible only when no friend has been encountered. The candidate
+retains only an ordered list of at most seven friendly sources, not every plan.
+
+Exhaustive empty/friendly/enemy occupancy tests for every ray and both colors
+matched the full single-destination resolver, including exact displacement order
+and fused termination. The 15-profile fixed-node gate also matched. However,
+the first implementation left `Iterator::next` out of line, with repeated cursor
+loads/stores. Timing under concurrent builds was far too noisy to establish a
+small win, and the Synthesis reset failure correctly stopped the comparison.
+That candidate was removed from production while the reset issue was isolated.
+
+Resume from a newly built repaired baseline, inspect whether inlining eliminates
+the cursor round trips, and measure whole search again. The proven ray identity
+is not a license to assume the first implementation is faster. The disposable
+patch is in the local `/tmp/push-chess-search-cost.F1XSll/ray-experiment.patch`
+while that temporary directory survives; no alternate production backend remains.

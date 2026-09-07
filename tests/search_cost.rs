@@ -42,6 +42,7 @@ fn whole_search_cost() {
     let mut engine = (entry.create)();
     let mut samples = Vec::new();
     let mut expected = None;
+    let mut expected_roots = Vec::new();
     for repetition in 0..3 {
         let (mut elapsed, mut nodes) = (0u128, 0u64);
         let mut fingerprint = 0xcbf29ce484222325u64;
@@ -59,6 +60,25 @@ fn whole_search_cost() {
             let (mv, stats) = engine.choose_move(black_box(&mut pos), black_box(&budget));
             elapsed += start.elapsed().as_nanos();
             nodes += stats.nodes;
+            let signature = (
+                mv,
+                stats.nodes,
+                stats.depth_reached,
+                stats.seldepth,
+                stats.eval_cp,
+                stats.diagnostics.clone(),
+                stats.pv.clone(),
+            );
+            if repetition == 0 {
+                expected_roots.push(signature);
+            } else {
+                assert_eq!(
+                    expected_roots[index],
+                    signature,
+                    "engine={name} repetition={repetition} root={index} fen={}",
+                    root.to_fen()
+                );
+            }
             for word in [
                 u64::from(mv.id()),
                 stats.nodes,
