@@ -74,7 +74,8 @@ uv run --no-sync pushzero nnue export models/residual-r3.safetensors \
   --output models/residual-r3.bin
 ```
 
-Artifact identities (models remain local ignored artifacts, not a second game store):
+Artifact identities (checkpoint and export are preserved in
+[models/](../models/README.md), not a second game store):
 
 - Export, 49,280 bytes: `a936e29830ffde362a94c4321deb19e7f216b4bc86285bc8c5edde2f350ae759`.
 - Checkpoint: `0847cb50db2fc560c71c5011684a705a240da818e15f9178e9e73ef6459ea94c`.

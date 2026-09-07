@@ -1,6 +1,11 @@
 /target
 /data
-/models
+/models/*
+!/models/README.md
+!/models/residual-r2.bin
+!/models/residual-r2.safetensors
+!/models/residual-r3.bin
+!/models/residual-r3.safetensors
 /experiments
 .DS_Store
 /.venv

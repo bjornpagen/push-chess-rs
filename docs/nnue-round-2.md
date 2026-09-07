@@ -55,7 +55,8 @@ Artifact identities:
 - Training sample SHA256: `92e28aea5e56297bb68740970e6c54ac25afba88b3f8291801bdd6adf93bb39c`.
 - Validation sample SHA256: `2ac4595a2b68c937b73de846dcde657889c12b1db761e8320ea1999972cb0199`.
 
-Artifacts belong in ignored `models/`; game facts remain only in bumbledb.
+The original checkpoint and export are preserved in [models/](../models/README.md);
+other experimental artifacts stay ignored. Game facts remain only in bumbledb.
 Source implementation is `5d19553` (HEAD `f836b3e` added audit documentation).
 
 ## Next playing test

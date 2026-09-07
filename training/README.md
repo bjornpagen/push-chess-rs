@@ -50,9 +50,9 @@ After the tournament has stopped and the corpus has passed `lab verify`:
 
 ```sh
 uv run pushzero nnue train --db data/corpus --runs 2 \
-  --output models/residual-r2.safetensors --steps 1000 --batch-size 256
-uv run pushzero nnue export models/residual-r2.safetensors \
-  --output models/residual-r2.bin
+  --output models/residual-candidate.safetensors --steps 1000 --batch-size 256
+uv run pushzero nnue export models/residual-candidate.safetensors \
+  --output models/residual-candidate.bin
 ```
 
 Source runs must be explicit. The native page reader validates every requested

@@ -60,9 +60,9 @@ explicit, sealed bumbledb source runs:
 uv sync --group dev
 uv run maturin develop --release
 uv run pushzero nnue train --db data/corpus --runs 2 \
-  --output models/residual-r2.safetensors --steps 1000 --batch-size 256
-uv run pushzero nnue export models/residual-r2.safetensors \
-  --output models/residual-r2.bin
+  --output models/residual-candidate.safetensors --steps 1000 --batch-size 256
+uv run pushzero nnue export models/residual-candidate.safetensors \
+  --output models/residual-candidate.bin
 ```
 
 Run this **after** the tournament releases the store and passes replay audit. Training is opt-in,
@@ -82,7 +82,8 @@ for later work; see [training](training/README.md).
 - `src/selfplay/`: reusable Rust neural-search runtime and history representation.
 - `training/`: tinygrad/Metal training and direct corpus reader.
 - `sources/`: retained research sources.
-- `data/`, `models/`: ignored local corpus and checkpoint artifacts.
+- `data/`: ignored local bumbledb corpus.
+- `models/`: [preserved r2/r3 models and checkpoints](models/README.md); other candidates stay ignored.
 
 See [the engine lab](docs/engine-lab.md) and [training](training/README.md).
 Retired engines and interactive/browser clients are in Git history.
