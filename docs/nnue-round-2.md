@@ -95,3 +95,9 @@ results, improve code and refine bounded candidates from eligible corpus runs,
 but leave any new candidate's playing strength unproven until the user explicitly
 reauthorizes games. The earlier replication/deeper-arena plan is not permission
 to run it now.
+
+Run 4 is now finished and audited: Aurora-r2 scored 55.0375% overall, 57.8%
+against Cataclysm and 51.1% against Abacus. All 10,000 games were terminal and
+passed replay; no new run followed. See [the complete result and first actual
+game review](run-4-review.md). The control remains unchanged and the candidate
+is not automatically promoted.

@@ -286,11 +286,13 @@ special-move fixtures and reachable roots. Its 2,048-node all-profile fingerprin
 is also identical to Abacus (`18076246204620320795`). Handwritten and neural boards
 both pass reference-rule transition checks.
 
-The first bracketed whole-search comparison is too noisy to establish a speed
-gain; see [the measurements](search-cost.md#granite-neural-free-representation).
-Keep Granite as an isolated experimental candidate and repeat idle measurements
-after Run 4. Do not promote it, change controls, or launch games to test it under
-the current no-more-tournaments instruction.
+The first contended whole-search comparison was inconclusive. After Run 4,
+the same bracketed protocol measured Granite at 5.37% less time than old Abacus,
+but also a 2–3% slowdown in existing controls from the shared refactor; see
+[the measurements](search-cost.md#granite-neural-free-representation).
+Keep Granite isolated and investigate that control overhead before treating
+the representation change as performance-complete. Do not promote it or launch
+games to test it under the current no-more-tournaments instruction.
 
 ## Audit search cost by entrant
 

@@ -13,8 +13,8 @@ stored JSON/FEN blobs. See [the relational model](docs/engine-lab.md#one-bumbled
 
 ## Engine laboratory
 
-Current research constraint: finish Run 4, then launch no further tournaments
-(including smoke or arena rounds). Continue code/model improvement instead;
+Current research constraint: Run 4 is finished and audited; launch no further
+tournaments (including smoke or arena rounds). Continue code/model improvement instead;
 see [the current authorization](docs/research-loop.md#current-authorization--2026-09-07).
 The commands below document the interface, not permission to start another run.
 

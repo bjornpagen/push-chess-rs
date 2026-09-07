@@ -6,8 +6,8 @@ commit and push verified implementation.
 
 ## Current authorization — 2026-09-07
 
-Let the already-running **Run 4** comparison finish, then **do not start another
-tournament**. This includes arena comparisons, smoke rounds, and self-play or
+**Run 4 is finished and audited. Do not start another tournament.**
+This includes arena comparisons, smoke rounds, and self-play or
 match campaigns. The user's latest instruction supersedes the older repeated
 tournament protocol below; a new campaign requires explicit reauthorization.
 
@@ -20,12 +20,20 @@ record untested candidates without starting games to validate them.
 
 The previous conversation, `Find best push chess model`, failed because its
 provider rejected continuation of that session. Work resumed in task
-`01a07bcd-a1a4-7ec0-8e52-b1239c048c8c`; the tournament itself survived. Its owner
-is PID 56591, with immutable executable SHA256
+`01a07bcd-a1a4-7ec0-8e52-b1239c048c8c`; the tournament itself survived. Its former
+owner was PID 56591, with immutable executable SHA256
 `f072dbca075b1775f5f007cf54bc19c850ea8e713290238e3004b3db9b0c905f`.
 Recheck actual process identity and live status rather than trusting a saved PID.
 The old `push-chess-engine-research` heartbeat disappeared during recovery;
 updating it failed because it no longer exists. It has not been recreated.
+
+Run 4 completed all 10,000 terminal games, 798,273 moves and 738,273 search
+observations. Full replay passed in 54.24 seconds with zero castling-transit
+warnings among 241 castles. Aurora-r2 led aggregate score at 55.0375%, ahead
+of Abacus at 52.6625%, but their direct score was only 51.1% for Aurora.
+No model is promoted. See [the final report and actual game review](run-4-review.md)
+for evidence and exact-history investigation targets. The database is released;
+no new campaign or training run was started during this audit/review.
 
 ## Current generation
 
@@ -71,16 +79,20 @@ Next bounded steps:
    exported alias is Aurora-r2, not a replacement for the control. Native
    inference remains the measured winner; neither backend choice nor training
    loss establishes strength.
-2. Let Run 4's existing 12-worker comparison of Cataclysm, Abacus, Waypoint,
-   Aurora-r2 and Astra finish. Audit after the owner exits, inspect paired
-   outcomes and failure modes, then improve the models without another arena.
+2. Run 4's five-entrant comparison is complete and audited. Continue inspecting
+   saved wins and losses and bounded exact-history analyses, then improve the
+   models without another arena. The first actual review is Run 4/game 12;
+   its route-sensitive knight move and defensive fork are investigation targets.
 3. Finish the Granite representation experiment: Abacus still updates and
    snapshots 256 accumulator bytes even though it discards their score;
    Granite has no weights, accumulator updates or neural undo bytes. Its shared,
    statically specialized search preserves Abacus's fixed-node behavior and
-   leaves Abacus unchanged as the mechanism control. Tests pass; repeat whole-
-   search timings once the machine is idle. Do not run wall-time games or
-   interpret a faster benchmark as evidence of greater strength.
+   leaves Abacus's decisions unchanged as the mechanism control. Tests pass.
+   Post-tournament timings measured Granite 5.37% faster than old Abacus on the
+   fixture harness, but the shared refactor added about 2–3% to the existing
+   controls' search time. Investigate this regression against the preserved
+   baseline before declaring the optimization complete; see search-cost.md.
+   Do not run wall-time games or equate a faster benchmark with stronger play.
 
 ## Historical round protocol — not authorized for another run
 

@@ -43,6 +43,33 @@ Saved executables (ignored local benchmark artifacts, not game datasources):
 - Candidate: `data/bin/search-cost-2b6630e805913de2`, SHA256
   `2b6630e805913de25d90348850a489376672a0130106be9cb2d0af2db06beea0`.
 
+### After the tournament: a measurable candidate gain and control cost
+
+Repeated the same 77-process protocol after Run 4's owner, full replay audit
+and game reanalysis had all exited. No tournament, training, build or other
+chess search ran concurrently; ordinary desktop activity remained. The saved
+executable bytes and every search signature were unchanged.
+
+| Profile | Pre-refactor ms | New representation ms | Pre-refactor repeat ms | Median within-repetition ratio |
+|---|---:|---:|---:|---:|
+| Cataclysm | 97.430 | 100.349 | 99.568 | 1.0200 |
+| Abacus | 93.655 | 96.153 | 93.637 | 1.0264 |
+| Granite (against Abacus) | 93.655 | 88.594 | 93.637 | 0.9463 |
+
+Granite took 5.37% less time than the bracketed old Abacus baseline, with all
+11 within-repetition ratios below one (0.9184–0.9794). Against Abacus in the
+same new binary, its median ratio was 0.9214 (7.86% less time). This supports
+the mechanism hypothesis on these twelve fixed-node fixtures, not playing
+strength, all-position throughput or an exact production-time improvement.
+
+The **shared refactor also shows a small control slowdown**: Cataclysm's median
+ratio is +2.00% (range +0.31–6.15%), and Abacus's is +2.64% (range -1.36–7.14%).
+Do not hide that cost by reporting only Granite against the slower new Abacus.
+Investigate emitted code, layout and neural update/snapshot costs against the
+saved pre-refactor executable, then repeat interleaved controls. No root cause
+has yet been established. Correctness is verified; control-neutral performance
+is not. Keep all identities explicit and start no tournament to validate it.
+
 ## Protocol
 
 `tests/search_cost.rs` is an ignored, bounded measurement harness, not a playing
