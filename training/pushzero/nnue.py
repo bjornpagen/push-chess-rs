@@ -305,6 +305,7 @@ def train(db, output, *, runs, steps=1000, batch_size=256, max_games=10000, vali
     learner = load(resume, training=True, jit=jit, device=device)[0] if resume else Learner(Model(device=device),jit=jit)
     before = evaluate(learner.model, validation, learner.score_scale)
     control = evaluate(Model(device=device), validation, learner.score_scale)
+    handwritten = evaluate(Model(bytes(MODEL_BYTES), device=device), validation, learner.score_scale)
     stopped, rng, started, metrics = False, np.random.default_rng(seed), time.monotonic(), {}
     def stop(*_):
         nonlocal stopped
@@ -322,7 +323,8 @@ def train(db, output, *, runs, steps=1000, batch_size=256, max_games=10000, vali
         "parent": str(resume) if resume else None, "parent_sha256": hashlib.sha256(Path(resume).read_bytes()).hexdigest() if resume else None,
         "seconds": time.monotonic()-started, "interrupted": stopped, "metrics": metrics,
         "training_device": learner.model.features.device,
-        "validation_before": before, "validation_after": after, "validation_control": control, "promotion_ready": False})
+        "validation_before": before, "validation_after": after, "validation_control": control,
+        "validation_handwritten": handwritten, "promotion_ready": False})
 
 
 def export(checkpoint, output):

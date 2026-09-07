@@ -65,3 +65,33 @@ Remeasure when the machine is idle, particularly before acting on small gaps.
 This is a choice among measured implementations, not a theorem about the fastest
 possible kernel. The comparison is kept runnable to challenge this decision.
 It opens no corpus, creates no persistent games, and saves no training weights.
+
+## Confirmation after Round 2, 2026-09-07
+
+The tournament had exited before this measurement, and no audit, training run
+or arena was active. Other application/background work, including a Rust build
+in another project, remained; this is lower contention, not machine isolation.
+Same hardware/runtime and interleaved harness, 31 repetitions at the default
+12 CPU tensor threads:
+
+| Work | Batch | Native CPU µs | tinygrad CPU µs | tinygrad Metal µs |
+|---|---:|---:|---:|---:|
+| Frozen inference, host inputs/output | 256 | 95.3 | 4,233.0 | 3,429.6 |
+| Frozen inference, tensor inputs resident, host output | 256 | 95.3 | 1,858.9 | 980.9 |
+| Frozen inference, host inputs/output | 1024 | 238.8 | 11,610.7 | 6,058.8 |
+| Frozen inference, tensor inputs resident, host output | 1024 | 238.8 | 6,766.9 | 1,006.7 |
+| Complete QAT update | 256 | — | 5,926.8 | 3,876.0 |
+| Complete QAT update | 1024 | — | 16,364.8 | 4,607.9 |
+
+Separate 15-repetition processes with `NUM_CPU_THREADS=1`, `4`, and `8` all
+retained the same backend winner. CPU update medians ranged 5.84–5.94 ms at
+256 and 15.61–15.71 ms at 1024; corresponding Metal medians were 3.82–3.93
+and 4.51–4.53 ms. Those processes were sequential, not a bracketed thread-count
+comparison, so small differences do not establish an optimal CPU thread count.
+
+The production decision remains native inference and Metal training at these
+batch sizes. Metal's complete update is about 1.5× faster at 256 and 3.6× at
+1024 in the default-thread confirmation. Native wins even against the favorable
+resident-tensor inference bound. Training performance and playing strength
+remain separate questions; larger batches are not interchangeable optimizer
+regimes merely because they process more examples per second.

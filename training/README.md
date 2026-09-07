@@ -122,8 +122,14 @@ tensor-core multiplication is disabled. Rust/NumPy/Metal parity and checkpoint
 optimizer recovery are regression-tested. All replay stays in RAM.
 
 Each checkpoint records source identities, sampling digest, optimizer state,
-control/export hashes and before/after validation loss. `--resume` restores
-optimizer-matched weights for a new seeded pass, not a bit-exact replay cursor.
+control/export hashes and before/after validation loss. Validation includes the
+old embedded network and a zero-network handwritten
+baseline, both scored by the same deployed native kernel. The zero network is
+only a validation reference, not the training initialization or an installed
+engine. Beating the old residual's loss alone does not beat the no-NNUE baseline.
+
+`--resume` restores optimizer-matched weights for a new seeded pass, not a
+bit-exact replay cursor.
 Export produces the separate 49,280-byte i16 candidate. It does **not** install
 the network, edit the embedded control, or promote it. Require fresh paired
 playing-strength tests at multiple budgets before adopting a candidate.

@@ -276,6 +276,8 @@ def test_bounded_training_requires_holdout_and_saves_only_models(monkeypatch, tm
     assert info["steps"] == 1 and info["training"]["source"] == "bumbledb"
     assert info["validation"]["split"] == "validation" and not info["promotion_ready"]
     assert info["validation_control"]["games"] == 2
+    assert info["validation_handwritten"]["games"] == 2
+    assert np.isfinite(info["validation_handwritten"]["loss"])
     assert list(tmp_path.iterdir()) == [path]
     def leaked(path, split, **kw):
         game = fake_game(1)
@@ -291,3 +293,11 @@ def test_bounded_training_requires_holdout_and_saves_only_models(monkeypatch, tm
     with pytest.raises(ValueError, match="no eligible terminal validation"):
         nnue.train(tmp_path, tmp_path/"rejected.safetensors", runs=[2], steps=1)
     assert list(tmp_path.iterdir()) == [path]
+
+
+def test_zero_network_validation_is_exactly_the_handwritten_control():
+    states = positions(32)
+    ids, baseline = nnue_inputs(states)
+    sides = np.array([state.turn() for state in states], np.uint8)
+    expected = np.clip(baseline.astype(np.int64) * (1 - 2*sides.astype(np.int64)) + 14, -28000, 28000)
+    np.testing.assert_array_equal(nnue.Model(bytes(nnue.MODEL_BYTES)).scores(ids,baseline,sides), expected)
