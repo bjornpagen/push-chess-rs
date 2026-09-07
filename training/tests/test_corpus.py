@@ -66,3 +66,44 @@ def test_teacher_pretraining_keeps_only_tensor_checkpoint_artifacts(corpus, tmp_
     assert restored["steps"] == 1
     assert not list(tmp_path.rglob("*.npz"))
     with pytest.raises(FileExistsError): train(corpus,path,steps=1)
+
+
+def test_nnue_page_features_are_owned_and_match_exact_replay(corpus):
+    from pushzero._native import nnue_inputs
+    all_games = [g for split in ("train", "validation", "test") for g in games(corpus, split, nnue=True)]
+    assert len(all_games) == 6
+    for game in all_games:
+        states, state = [], State(game["initial_fen"])
+        for move in game["moves"]:
+            states.append(state.copy())
+            state.play(int(move))
+        ids, baselines = nnue_inputs(states)
+        np.testing.assert_array_equal(game["nnue_features"], ids)
+        np.testing.assert_array_equal(game["nnue_baselines"], baselines)
+        assert game["in_check"].dtype == np.bool_ and game["in_check"].shape == (len(states),)
+
+
+def test_nnue_training_from_real_terminal_relations(tmp_path):
+    from pushzero.nnue import train, load, export
+    lab = Path(__file__).resolve().parents[2] / "target/release/lab"
+    db = tmp_path / "terminal-corpus"
+    def command(*args):
+        result = subprocess.run([str(lab), *args], capture_output=True, text=True, timeout=120)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+    command("init", "--db", str(db))
+    command("tournament", "--db", str(db), "--engines", "cataclysm,astra", "--pairs", "32",
+            "--workers", "1", "--nodes", "256", "--max-plies", "128", "--opening-plies", "4",
+            "--purpose", "corpus", "--max-seconds", "90", "--seed", "2026090613")
+    audited = command("verify", "--db", str(db), "--run", "1")
+    assert audited["verified_games"] == 64 and audited["terminal_games"] > 0
+    path = tmp_path / "outcome.safetensors"
+    info = train(db, path, runs=[1], steps=1, batch_size=4, max_games=8, validation_games=4,
+                 positions_per_game=2, jit=False)
+    assert info["steps"] == 1 and info["validation_control"]["games"] > 0
+    assert info["training"]["split"] == "train" and info["validation"]["split"] == "validation"
+    assert info["training"]["retained_positions"] <= 16
+    learner, restored = load(path, training=True, jit=False)
+    assert learner.steps == 1 and restored["export_sha256"] == info["export_sha256"]
+    export(path, tmp_path / "candidate.bin")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["candidate.bin", "outcome.safetensors", "terminal-corpus"]

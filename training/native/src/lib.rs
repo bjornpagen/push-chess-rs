@@ -5,6 +5,7 @@ use numpy::{
     PyUntypedArrayMethods, ndarray::Array,
 };
 use push_chess::core::types::{Color, SearchBudget};
+use push_chess::engines::cataclysm::learning as nnue;
 use push_chess::selfplay::{self, ACTION_FIELDS, Encoded, Features};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -16,6 +17,7 @@ type Observation<'py> = (
     Bound<'py, PyArray2<i32>>,
 );
 type NeuralBatch<'py> = (Bound<'py, PyArray4<f32>>, Bound<'py, PyArray3<i32>>);
+type NnueBatch<'py> = (Bound<'py, PyArray3<u16>>, Bound<'py, PyArray1<i32>>);
 type EvaluationRequest<'py> = (
     u64,
     Bound<'py, PyArray4<f32>>,
@@ -90,6 +92,60 @@ fn neural_batch(py: Python<'_>, f: Features) -> NeuralBatch<'_> {
             .unwrap()
             .into_pyarray(py),
     )
+}
+
+fn nnue_batch(py: Python<'_>, rows: Vec<nnue::Input>) -> NnueBatch<'_> {
+    let count = rows.len();
+    let mut ids = Vec::with_capacity(count * 2 * nnue::SLOTS);
+    let mut baselines = Vec::with_capacity(count);
+    for row in rows {
+        for perspective in row.ids {
+            ids.extend_from_slice(&perspective);
+        }
+        baselines.push(row.baseline);
+    }
+    (
+        Array::from_shape_vec((count, 2, nnue::SLOTS), ids)
+            .unwrap()
+            .into_pyarray(py),
+        baselines.into_pyarray(py),
+    )
+}
+
+#[pyfunction]
+fn nnue_control(py: Python<'_>) -> Bound<'_, pyo3::types::PyBytes> {
+    pyo3::types::PyBytes::new(py, nnue::CONTROL_BYTES)
+}
+
+#[pyfunction]
+fn nnue_inputs<'py>(py: Python<'py>, states: Vec<PyRef<'_, State>>) -> PyResult<NnueBatch<'py>> {
+    if states.len() > 4096 {
+        return Err(PyValueError::new_err("NNUE batch exceeds 4096 positions"));
+    }
+    Ok(nnue_batch(
+        py,
+        states
+            .iter()
+            .map(|s| nnue::input(s.inner.position()))
+            .collect(),
+    ))
+}
+
+#[pyfunction]
+fn nnue_evaluate<'py>(
+    py: Python<'py>,
+    model: &[u8],
+    states: Vec<PyRef<'_, State>>,
+) -> PyResult<Bound<'py, PyArray1<i32>>> {
+    if states.len() > 4096 {
+        return Err(PyValueError::new_err("NNUE batch exceeds 4096 positions"));
+    }
+    let evaluator = nnue::Evaluator::decode(model).map_err(PyValueError::new_err)?;
+    Ok(states
+        .iter()
+        .map(|s| evaluator.evaluate(s.inner.position()))
+        .collect::<Vec<_>>()
+        .into_pyarray(py))
 }
 
 fn evaluation_request(py: Python<'_>, id: u64, f: Features) -> EvaluationRequest<'_> {
@@ -596,13 +652,14 @@ impl CorpusReader {
             ),
         })
     }
-    #[pyo3(signature = (split="train", after=(0,0), limit=8))]
+    #[pyo3(signature = (split="train", after=(0,0), limit=8, nnue=false))]
     fn page<'py>(
         &self,
         py: Python<'py>,
         split: &str,
         after: (u64, u64),
         limit: usize,
+        nnue: bool,
     ) -> PyResult<PythonCorpusPage<'py>> {
         let page = self
             .corpus()?
@@ -612,6 +669,21 @@ impl CorpusReader {
         for game in page.games {
             let g = game.trajectory;
             let row = pyo3::types::PyDict::new(py);
+            if nnue {
+                let mut state =
+                    selfplay::State::from_fen(&g.initial_fen).map_err(PyValueError::new_err)?;
+                let mut rows = Vec::with_capacity(g.plies.len());
+                let mut check = Vec::with_capacity(g.plies.len());
+                for ply in &g.plies {
+                    rows.push(nnue::input(state.position()));
+                    check.push(state.position().in_check());
+                    state.play(ply.action).map_err(PyValueError::new_err)?;
+                }
+                let (features, baselines) = nnue_batch(py, rows);
+                row.set_item("nnue_features", features)?;
+                row.set_item("nnue_baselines", baselines)?;
+                row.set_item("in_check", check.into_pyarray(py))?;
+            }
             row.set_item("run_id", game.run_id)?;
             row.set_item("game_index", g.index)?;
             row.set_item("initial_fen", g.initial_fen)?;
@@ -681,6 +753,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Opponent>()?;
     m.add_class::<CorpusReader>()?;
     m.add_function(wrap_pyfunction!(observations, m)?)?;
+    m.add_function(wrap_pyfunction!(nnue_control, m)?)?;
+    m.add_function(wrap_pyfunction!(nnue_inputs, m)?)?;
+    m.add_function(wrap_pyfunction!(nnue_evaluate, m)?)?;
     m.add("RULES_VERSION", selfplay::RULES_VERSION)?;
     m.add("ENCODING_VERSION", selfplay::ENCODING_VERSION)?;
     m.add("EFFECT_ENCODING_VERSION", selfplay::EFFECT_ENCODING_VERSION)?;

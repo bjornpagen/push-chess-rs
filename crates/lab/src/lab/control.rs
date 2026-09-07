@@ -21,6 +21,24 @@ fn endpoint(db: &Path) -> Result<PathBuf> {
         "/tmp/push-chess-lab-{digest:x}.sock"
     )))
 }
+
+fn configure_client(stream: &UnixStream) -> std::io::Result<()> {
+    // Darwin may inherit O_NONBLOCK from the listening socket. A report can
+    // exceed the socket buffer, so an accepted client must use bounded blocking
+    // I/O rather than silently losing the tail on WouldBlock.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(500)))
+}
+
+fn send_response(stream: &mut UnixStream, response: &serde_json::Value) -> Result<()> {
+    // Serialize once: serde's Display otherwise produces thousands of tiny
+    // socket writes. JSON here is a presentation protocol, not game storage.
+    let mut bytes = serde_json::to_vec(response)?;
+    bytes.push(b'\n');
+    stream.write_all(&bytes)?;
+    Ok(())
+}
 pub struct Control {
     listener: UnixListener,
     path: PathBuf,
@@ -39,8 +57,7 @@ impl Control {
             return;
         };
         let result = (|| -> Result<serde_json::Value> {
-            stream.set_read_timeout(Some(Duration::from_millis(100)))?;
-            stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+            configure_client(&stream)?;
             let mut line = String::new();
             std::io::BufReader::new((&mut stream).take(1024)).read_line(&mut line)?;
             let command: serde_json::Value = serde_json::from_str(&line)?;
@@ -54,7 +71,9 @@ impl Control {
             Ok(value) => value,
             Err(e) => serde_json::json!({"error":e.to_string()}),
         };
-        let _ = writeln!(stream, "{response}");
+        if let Err(error) = send_response(&mut stream, &response) {
+            eprintln!("status client disconnected or timed out: {error}");
+        }
     }
 }
 impl Drop for Control {
@@ -83,6 +102,27 @@ pub fn status(db: &Path, run: Option<u64>) -> Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_response_survives_nonblocking_accept_and_fragmented_reads() {
+        let (mut server, client) = UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let expected = serde_json::json!({"report":"x".repeat(256 * 1024)});
+        let sent = expected.clone();
+        let writer = std::thread::spawn(move || {
+            configure_client(&server).unwrap();
+            send_response(&mut server, &sent).unwrap();
+        });
+        let mut reader = std::io::BufReader::with_capacity(127, client);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.ends_with('\n'));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+            expected
+        );
+        writer.join().unwrap();
+    }
 
     #[test]
     fn long_paths_and_aliases_share_a_short_exclusive_endpoint() {

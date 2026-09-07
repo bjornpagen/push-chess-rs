@@ -69,6 +69,22 @@ for trying many hypotheses. A selected candidate needs a new independent
 comparison and deeper-budget confirmation. Training loss, a tiny sample or a
 single lucky tournament is insufficient. No automatic champion replacement.
 
+Reports now retain the five-bin color-swapped pair score histogram (0, 0.5,
+1, 1.5, 2 points for the first entrant), count incomplete pairs explicitly,
+and separate missing games from saved games without outcomes. Repeated
+four-ply opening families are clustered before calculating uncertainty.
+The family-balanced mean has conservative fixed-sample Hoeffding bounds,
+including a Bonferroni correction across the run's matchups. These bounds
+assume independent opening families; they are not sequential stopping rules.
+Looking repeatedly, selecting hypotheses, incomplete-result selection and
+strategic similarity all require fresh independent confirmation. Overall
+score bounds still account pessimistically/optimistically for missing results.
+
+The `pushzero nnue` path refines the small existing residual from explicit,
+sealed bumbledb source runs. It keeps terminal outcomes separate from raw
+search scores and exports an isolated candidate. See training/README.md for
+the arithmetic, sampling, strict holdout and preservation-of-control contract.
+
 ## Process ownership and resource policy
 
 The 30-minute task heartbeat follows this same task and checkout. Before

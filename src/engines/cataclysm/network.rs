@@ -4,7 +4,14 @@ use crate::core::types::*;
 use std::sync::LazyLock;
 
 pub const WIDTH: usize = 32;
-type FeatureWeights = [[i16; WIDTH]; 768];
+pub const FEATURES: usize = 2 * 6 * 64;
+type FeatureWeights = [[i16; WIDTH]; FEATURES];
+
+pub(super) fn feature_index(piece: Piece, sq: u8, perspective: usize) -> usize {
+    let color = piece.color as usize ^ perspective;
+    let square = sq ^ if perspective == 0 { 0 } else { 56 };
+    (color * 6 + piece.piece_type as usize - 1) * 64 + square as usize
+}
 pub struct Network {
     weights: FeatureWeights,
     bias: [i32; WIDTH],
@@ -21,7 +28,7 @@ impl Network {
         &MODEL
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        if bytes.len() != (768 * WIDTH + 2 * WIDTH) * 2 {
+        if bytes.len() != (FEATURES * WIDTH + 2 * WIDTH) * 2 {
             return Err("invalid Cataclysm model shape".into());
         }
         let mut words = bytes
@@ -58,11 +65,8 @@ impl Accumulator {
 
 impl Accumulator {
     pub fn update(&mut self, piece: Piece, sq: u8, sign: i32, model: &Network) {
-        let pt = piece.piece_type as usize - 1;
         for (perspective, hidden) in self.hidden.iter_mut().enumerate() {
-            let color = piece.color as usize ^ perspective;
-            let square = if perspective == 0 { sq } else { sq ^ 56 };
-            let weights = &model.weights[(color * 6 + pt) * 64 + square as usize];
+            let weights = &model.weights[feature_index(piece, sq, perspective)];
             for (acc, &w) in hidden.iter_mut().zip(weights) {
                 *acc += sign * i32::from(w);
             }

@@ -37,17 +37,10 @@ pub fn piece_score(p: Piece, sq: u8) -> (i32, i32) {
     PST[p.color as usize][p.piece_type as usize][sq as usize]
 }
 
-pub fn evaluate<const V: usize>(b: &Board) -> i32 {
+pub(super) fn baseline_white(b: &Board) -> i32 {
     let phase = b.phase.min(24);
     let baseline = ((b.mg[0] - b.mg[1]) * phase + (b.eg[0] - b.eg[1]) * (24 - phase)) / 24;
-    let profile = super::experiments::PROFILES[V];
-    let mut white = baseline + profile.neural_scale * (b.net.white_residual(b.model) / 2);
-    if profile.geometry {
-        white += super::experiments::geometry(b);
-    }
-    if profile.logistics {
-        white += super::experiments::logistics(b);
-    }
+    let mut white = baseline;
     for c in 0..2 {
         let sign = if c == 0 { 1 } else { -1 };
         let mut pawns = b.men[c][1];
@@ -62,6 +55,18 @@ pub fn evaluate<const V: usize>(b: &Board) -> i32 {
         if b.men[c][3].count_ones() >= 2 {
             white += sign * 30;
         }
+    }
+    white
+}
+
+pub fn evaluate<const V: usize>(b: &Board) -> i32 {
+    let profile = super::experiments::PROFILES[V];
+    let mut white = baseline_white(b) + profile.neural_scale * (b.net.white_residual(b.model) / 2);
+    if profile.geometry {
+        white += super::experiments::geometry(b);
+    }
+    if profile.logistics {
+        white += super::experiments::logistics(b);
     }
     (if b.pos.side_to_move == Color::White {
         white

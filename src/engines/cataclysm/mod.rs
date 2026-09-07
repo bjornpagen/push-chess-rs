@@ -3,6 +3,7 @@
 mod board;
 mod eval;
 pub mod experiments;
+pub mod learning;
 mod network;
 mod siege;
 

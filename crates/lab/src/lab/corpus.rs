@@ -261,7 +261,7 @@ impl Corpus {
             "runs":runs}),
         )
     }
-    /// Descriptive score bounds, not Elo or an automatic promotion gate.
+    /// Paired fixed-sample evidence, not Elo or an automatic promotion gate.
     pub fn report(&self, run: u64) -> Result<Value> {
         let w = work()?;
         let snapshot = self.db.snapshot(&w)?;
@@ -270,21 +270,16 @@ impl Corpus {
             .get(RunById { id: RunId(run) })?
             .ok_or("unknown run")?;
         let config: RunConfig = relational::config(&frame, &meta)?;
-        let mut results = std::collections::BTreeMap::<(String, String), [u64; 5]>::new();
-        for (a, b) in config.matchups() {
-            results.insert(
-                (config.engines[a].clone(), config.engines[b].clone()),
-                [0; 5],
-            );
-        }
+        let matchups = config.matchups();
+        let mut results = vec![[0u64; 5]; matchups.len()];
+        let mut outcomes = vec![[None; 2]; config.total_pairs()];
         for row in frame.scan_facts::<Game>()? {
             let game = row?;
             if game.run.0 != run {
                 continue;
             }
-            let (a, b) = config.matchup(game.index as usize / 2);
             let tally = results
-                .get_mut(&(config.engines[a].clone(), config.engines[b].clone()))
+                .get_mut(game.pair as usize % matchups.len())
                 .ok_or("unplanned matchup")?;
             tally[3] += 1;
             tally[4] += game.plies;
@@ -293,6 +288,9 @@ impl Corpus {
                 game: game.index,
             })? {
                 let relative = white_value(result.outcome)? * if !game.swapped { 1 } else { -1 };
+                outcomes
+                    .get_mut(game.pair as usize)
+                    .ok_or("unplanned pair")?[usize::from(game.swapped)] = Some(relative);
                 tally[if relative > 0 {
                     0
                 } else if relative == 0 {
@@ -302,17 +300,35 @@ impl Corpus {
                 }] += 1;
             }
         }
+        let mut evidence: Vec<_> = (0..matchups.len())
+            .map(|_| super::statistics::PairedScores::default())
+            .collect();
+        for (index, result) in outcomes.into_iter().enumerate() {
+            if let [Some(first), Some(second)] = result {
+                let pair = frame
+                    .get(PairByRunIndex {
+                        run: RunId(run),
+                        index: index as u64,
+                    })?
+                    .ok_or("missing pair")?;
+                evidence[index % matchups.len()].record(pair.opening, [first, second]);
+            }
+        }
         let status = frame.get(RunEndByRun { run: RunId(run) })?;
-        let pairs: Vec<_> = results.into_iter().map(|((a,b),r)| {
+        let pairs: Vec<_> = matchups.iter().enumerate().map(|(index, &(a,b))| {
+            let r = results[index];
             let known = r[0]+r[1]+r[2]; let scheduled = (config.pairs*2) as f64;
             let score = r[0] as f64 + r[1] as f64*0.5;
-            json!({"a":a,"b":b,"wins":r[0],"draws":r[1],"losses":r[2],"saved":r[3],"positions":r[4],
+            json!({"a":config.engines[a],"b":config.engines[b],"wins":r[0],"draws":r[1],"losses":r[2],"saved":r[3],"positions":r[4],
+                "saved_without_outcome":r[3]-known,"missing_games":config.pairs*2-r[3] as usize,
                 "unknown_or_missing":config.pairs*2-known as usize,
-                "score_bounds":[score/scheduled,(score+scheduled-known as f64)/scheduled]})
+                "score_bounds":[score/scheduled,(score+scheduled-known as f64)/scheduled],
+                "paired":evidence[index].report(config.pairs,matchups.len())})
         }).collect();
         Ok(
             json!({"run":run,"status":status.map(|s|status_name(s.status)).unwrap_or("running"),
-            "scheduled_games":config.total_pairs()*2,"matchups":pairs,"promotion_ready":false}),
+            "scheduled_games":config.total_pairs()*2,"matchups":pairs,"promotion_ready":false,
+            "uncertainty":"Fixed-sample bounds assume independent opening families; exploratory, not sequential or a held-out promotion test. Incomplete pairs are excluded, not draws."}),
         )
     }
     /// Offline integrity audit. Includes quarantined and interrupted games;
@@ -629,6 +645,46 @@ mod tests {
         .unwrap();
         assert_eq!(corpus.report(run).unwrap()["status"], "interrupted");
         assert_eq!(corpus.summary().unwrap()["totals"]["games"], 2);
+        corpus.close().unwrap();
+    }
+
+    #[test]
+    fn report_joins_both_colors_and_keeps_unknown_and_missing_distinct() {
+        let (_dir, mut corpus) = create();
+        let mut config = config();
+        config.pairs = 2;
+        let run = corpus.start(&config).unwrap();
+        let mut game = fixture();
+        game.initial_fen = "7k/6Q1/5K2/8/8/8/8/8 b - - 0 1".into();
+        game.final_fen = game.initial_fen.clone();
+        game.plies.clear();
+        game.termination = "checkmate".into();
+        game.white_value = Some(1);
+        game.opening_key = super::super::opening_key(&game.initial_fen, std::iter::empty());
+        game.split = super::super::split(&game.opening_key).into();
+        corpus.save(run, &game).unwrap();
+        game.index = 1;
+        std::mem::swap(&mut game.white, &mut game.black);
+        corpus.save(run, &game).unwrap();
+        let mut capped = fixture();
+        capped.index = 2;
+        capped.pair = Some(1);
+        corpus.save(run, &capped).unwrap();
+        let report = corpus.report(run).unwrap();
+        let matchup = &report["matchups"][0];
+        assert_eq!(matchup["wins"], 1);
+        assert_eq!(matchup["losses"], 1);
+        assert_eq!(matchup["saved_without_outcome"], 1);
+        assert_eq!(matchup["missing_games"], 1);
+        assert_eq!(matchup["score_bounds"], json!([0.25, 0.75]));
+        assert_eq!(matchup["paired"]["complete_pairs"], 1);
+        assert_eq!(matchup["paired"]["incomplete_or_missing_pairs"], 1);
+        assert_eq!(
+            matchup["paired"]["pair_points_histogram"],
+            json!([0, 0, 1, 0, 0])
+        );
+        assert_eq!(matchup["paired"]["pair_score"], 0.5);
+        assert_eq!(report["promotion_ready"], false);
         corpus.close().unwrap();
     }
 

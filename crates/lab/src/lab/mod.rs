@@ -3,6 +3,7 @@ mod corpus;
 mod relational;
 mod runner;
 pub mod schema;
+mod statistics;
 
 pub use corpus::{Corpus, CorpusGame, CorpusPage, digest_file};
 pub use runner::{RunConfig, generate, generate_controlled};
