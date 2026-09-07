@@ -46,6 +46,9 @@ not a blanket assertion that SoA is faster.
 The shared selector now retains its current maximum in a register instead of
 reloading it through a dependent index. Exact first/last tie behavior and all
 15 fixed-node fingerprints are preserved; see the [measured change](move-ordering.md).
+Astra's constant piece-square geometry is now a compile-time table, exhaustively
+equivalent to the original formula. A separate experiment retaining all Astra
+push plans lost and was removed; see the [whole-search comparisons](search-cost.md).
 
 Cataclysm reuses per-ply action and quiet-history buffers and root history
 capacity. Astra uses inline scored moves with safe overflow. There are no

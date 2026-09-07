@@ -249,7 +249,74 @@ const PASSED_MASKS: [[u64; 64]; 2] = {
     masks
 };
 
+// The handwritten geometry is constant over the game. Compute it at compile
+// time, share one white-relative table, and reflect black squares on lookup.
+// Both phases together occupy 1,792 bytes; no per-engine copy or initialization.
+const PLACEMENT: [[[i16; 64]; 7]; 2] = {
+    let pieces = [
+        PieceType::None,
+        PieceType::Pawn,
+        PieceType::Knight,
+        PieceType::Bishop,
+        PieceType::Rook,
+        PieceType::Queen,
+        PieceType::King,
+    ];
+    let mut table = [[[0; 64]; 7]; 2];
+    let mut phase = 0;
+    while phase < 2 {
+        let mut piece = 0;
+        while piece < 7 {
+            let mut sq = 0;
+            while sq < 64 {
+                let rank = (sq / 8) as i32;
+                let file = (sq % 8) as i32;
+                // Distance to the central four squares, for coordinates 0..7.
+                let center = (2 * file - 7).abs() / 2 + (2 * rank - 7).abs() / 2;
+                let value = match pieces[piece] {
+                    PieceType::Pawn => {
+                        rank * 5 + if rank > 3 { (rank - 3).pow(2) * 4 } else { 0 }
+                            - (file - 3).abs() * 2
+                    }
+                    PieceType::Knight => 32 - center * 10,
+                    PieceType::Bishop => 20 - center * 5,
+                    PieceType::Rook => {
+                        if rank == 6 {
+                            24
+                        } else {
+                            rank * 2
+                        }
+                    }
+                    PieceType::Queen => 12 - center * 3,
+                    PieceType::King if phase == 1 => 36 - center * 12,
+                    PieceType::King => {
+                        -rank * 12
+                            + if rank == 0 && (file <= 2 || file >= 6) {
+                                24
+                            } else {
+                                0
+                            }
+                    }
+                    PieceType::None => 0,
+                };
+                assert!(value >= i16::MIN as i32 && value <= i16::MAX as i32);
+                table[phase][piece][sq] = value as i16;
+                sq += 1;
+            }
+            piece += 1;
+        }
+        phase += 1;
+    }
+    table
+};
+
+#[inline]
 fn placement(piece: PieceType, color: Color, sq: Square, endgame: bool) -> i32 {
+    i32::from(PLACEMENT[endgame as usize][piece as usize][sq as usize ^ (color as usize * 56)])
+}
+
+#[cfg(test)]
+fn placement_reference(piece: PieceType, color: Color, sq: Square, endgame: bool) -> i32 {
     let rank = if color == Color::White {
         rank_of(sq)
     } else {
@@ -996,6 +1063,31 @@ pub fn create_experiment<const V: usize>() -> Box<dyn Engine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placement_table_matches_formula_for_every_input() {
+        assert_eq!(size_of_val(&PLACEMENT), 1792);
+        for piece in [
+            PieceType::None,
+            PieceType::Pawn,
+            PieceType::Knight,
+            PieceType::Bishop,
+            PieceType::Rook,
+            PieceType::Queen,
+            PieceType::King,
+        ] {
+            for color in [Color::White, Color::Black] {
+                for sq in 0..64 {
+                    for endgame in [false, true] {
+                        assert_eq!(
+                            placement(piece, color, sq, endgame),
+                            placement_reference(piece, color, sq, endgame)
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     #[ignore = "opt-in release ordering measurement, run serially on an idle machine"]
