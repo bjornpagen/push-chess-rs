@@ -3,7 +3,7 @@
 use super::corpus::{ending_id, ending_name, insert, split_id, unhex, white_value};
 use super::schema::*;
 use super::{Ply, Result, Roster, RunConfig, Trajectory, legal_moves};
-use bumbledb::{BindValue, ChangeSetBuilder, ReadFrame};
+use bumbledb::{BindValue, ChangeSetBuilder, PreparedQuery, ReadFrame};
 use push_chess::core::{position::Position as Board, types as core};
 use sha2::{Digest, Sha256};
 
@@ -589,20 +589,40 @@ fn delta_rows(rows: bumbledb::Answers) -> Result<Vec<PieceDelta>> {
     Ok(result)
 }
 
-pub(super) fn read_game(frame: &ReadFrame<'_, TrainingGround>, g: &Game) -> Result<Trajectory> {
-    // Two indexed game-prefix queries, not 128 square probes per ply or a
-    // scan of the corpus. Exact delta sets are checked against rules replay.
-    let removed_query = bumbledb::query!(TrainingGround {
-        (ply, square, side, kind) | PieceRemoved(run, game, ply, square, side, kind), run == ?run, game == ?game;
-    });
-    let placed_query = bumbledb::query!(TrainingGround {
-        (ply, square, side, kind) | PiecePlaced(run, game, ply, square, side, kind), run == ?run, game == ?game;
-    });
+/// Prepared queries own the reusable selection indexes. Dropping one for each
+/// game discards that work even when the underlying relation image is cached.
+/// bumbledb checks source identity and relation epochs on every execution.
+pub(super) struct GameReader {
+    removed: PreparedQuery<TrainingGround>,
+    placed: PreparedQuery<TrainingGround>,
+}
+
+impl GameReader {
+    pub(super) fn new(frame: &ReadFrame<'_, TrainingGround>) -> Result<Self> {
+        let removed = bumbledb::query!(TrainingGround {
+            (ply, square, side, kind) | PieceRemoved(run, game, ply, square, side, kind), run == ?run, game == ?game;
+        });
+        let placed = bumbledb::query!(TrainingGround {
+            (ply, square, side, kind) | PiecePlaced(run, game, ply, square, side, kind), run == ?run, game == ?game;
+        });
+        Ok(Self {
+            removed: frame.prepare(&removed)?,
+            placed: frame.prepare(&placed)?,
+        })
+    }
+}
+
+pub(super) fn read_game(
+    frame: &ReadFrame<'_, TrainingGround>,
+    g: &Game,
+    reader: &mut GameReader,
+) -> Result<Trajectory> {
+    // The first query may build a relation-sized selection index. Retain it
+    // across games/pages; do not mistake a logical prefix for a physical seek.
+    // Exact delta sets remain checked against the authoritative rules replay.
     let args = [BindValue::U64(g.run.0), BindValue::U64(g.index)];
-    let mut query = frame.prepare(&removed_query)?;
-    let removed = delta_rows(frame.execute_collect(&mut query, &args)?)?;
-    let mut query = frame.prepare(&placed_query)?;
-    let placed = delta_rows(frame.execute_collect(&mut query, &args)?)?;
+    let removed = delta_rows(frame.execute_collect(&mut reader.removed, &args)?)?;
+    let placed = delta_rows(frame.execute_collect(&mut reader.placed, &args)?)?;
     let mut removed = removed.into_iter();
     let mut placed = placed.into_iter();
     let pair = frame

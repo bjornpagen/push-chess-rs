@@ -8,6 +8,7 @@ use bumbledb::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -131,11 +132,15 @@ pub struct CorpusPage {
 }
 pub struct Corpus {
     db: Db<TrainingGround>,
+    reader: RefCell<Option<relational::GameReader>>,
 }
 impl Corpus {
     pub fn create(path: &Path) -> Result<Self> {
         match Db::create(path, TrainingGround, work()?)? {
-            Admission::Accepted(db) => Ok(Self { db }),
+            Admission::Accepted(db) => Ok(Self {
+                db,
+                reader: RefCell::new(None),
+            }),
             Admission::Rejected(v) => Err(format!("empty schema rejected: {v:?}").into()),
         }
     }
@@ -143,13 +148,31 @@ impl Corpus {
     pub fn open(path: &Path) -> Result<Self> {
         Ok(Self {
             db: Db::open(path, TrainingGround, work()?)?,
+            reader: RefCell::new(None),
         })
     }
     pub fn close(&self) -> Result<()> {
+        self.reader.borrow_mut().take();
         match self.db.close(&work()?) {
             CloseReport::Closed => Ok(()),
             report => Err(format!("database close incomplete: {report:?}").into()),
         }
+    }
+
+    fn read_game(
+        &self,
+        frame: &bumbledb::ReadFrame<'_, TrainingGround>,
+        game: &Game,
+    ) -> Result<Trajectory> {
+        let mut reader = self.reader.borrow_mut();
+        if reader.is_none() {
+            *reader = Some(relational::GameReader::new(frame)?);
+        }
+        relational::read_game(
+            frame,
+            game,
+            reader.as_mut().expect("initialized game reader"),
+        )
     }
     pub fn disk_bytes(&self) -> Result<u64> {
         Ok(self.db.disk_size(work()?)?)
@@ -370,7 +393,7 @@ impl Corpus {
             else {
                 continue;
             };
-            let game = relational::read_game(&frame, &g)?;
+            let game = self.read_game(&frame, &g)?;
             let audit = game.validate()?;
             castles += audit.castles;
             transit_anomalies += audit.castling_transit_anomalies.len() as u64;
@@ -488,7 +511,7 @@ impl Corpus {
                 if game.split != selected || game.ending == Ending::Interrupted.id() {
                     continue;
                 }
-                let trajectory = relational::read_game(&frame, &game)?;
+                let trajectory = self.read_game(&frame, &game)?;
                 trajectory.validate()?;
                 games.push(CorpusGame {
                     run_id: id,
@@ -525,7 +548,7 @@ impl Corpus {
         let game = frame
             .get(GameByRunIndex { run: run.id, index })?
             .ok_or("unknown saved game")?;
-        let trajectory = relational::read_game(&frame, &game)?;
+        let trajectory = self.read_game(&frame, &game)?;
         trajectory.validate()?;
         Ok(CorpusGame {
             run_id: run.id.0,
@@ -682,33 +705,46 @@ mod tests {
     }
     #[test]
     fn reader_rejects_missing_delta_even_when_moves_are_legal() {
-        let (_dir, mut corpus) = create();
-        let run = corpus.start(&config()).unwrap();
-        corpus.save(run, &fixture()).unwrap();
-        let w = work().unwrap();
-        let mut values = Vec::new();
-        {
-            let snapshot = corpus.db.snapshot(&w).unwrap();
-            let frame = snapshot.frame(&w);
-            let fact = frame
-                .scan_facts::<PieceRemoved>()
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap();
-            fact.append_values(&mut values).unwrap();
+        for (relation, error) in [
+            (PieceRemoved::RELATION, "piece removal set"),
+            (PiecePlaced::RELATION, "piece placement set"),
+        ] {
+            let (_dir, mut corpus) = create();
+            let run = corpus.start(&config()).unwrap();
+            corpus.save(run, &fixture()).unwrap();
+            // Warm both query indexes, then invalidate each relation separately.
+            assert_eq!(corpus.verify(run).unwrap()["verified_games"], 1);
+            let w = work().unwrap();
+            let mut values = Vec::new();
+            {
+                let snapshot = corpus.db.snapshot(&w).unwrap();
+                let frame = snapshot.frame(&w);
+                if relation == PieceRemoved::RELATION {
+                    frame
+                        .scan_facts::<PieceRemoved>()
+                        .unwrap()
+                        .next()
+                        .unwrap()
+                        .unwrap()
+                        .append_values(&mut values)
+                        .unwrap();
+                } else {
+                    frame
+                        .scan_facts::<PiecePlaced>()
+                        .unwrap()
+                        .next()
+                        .unwrap()
+                        .unwrap()
+                        .append_values(&mut values)
+                        .unwrap();
+                }
+            }
+            let mut draft = ChangeSet::builder(corpus.db.schema(), w.clone());
+            draft.delete(relation, &values).unwrap();
+            corpus.apply(draft, &w).unwrap();
+            assert!(corpus.verify(run).unwrap_err().to_string().contains(error));
+            corpus.close().unwrap();
         }
-        let mut draft = ChangeSet::builder(corpus.db.schema(), w.clone());
-        draft.delete(PieceRemoved::RELATION, &values).unwrap();
-        corpus.apply(draft, &w).unwrap();
-        assert!(
-            corpus
-                .verify(run)
-                .unwrap_err()
-                .to_string()
-                .contains("piece removal set")
-        );
-        corpus.close().unwrap();
     }
     #[test]
     fn schema_rejects_orphan_analysis_and_unlabelled_terminal() {
@@ -872,6 +908,73 @@ mod tests {
                 .is_err()
         );
         corpus.close().unwrap();
+    }
+
+    #[test]
+    fn retained_query_work_is_flat_across_game_count_and_fresh_snapshots() {
+        use bumbledb::work::Resource;
+        let original = fixture();
+        let mut costs = Vec::new();
+        for size in [16, 128] {
+            let (_dir, mut corpus) = create();
+            let mut config = config();
+            config.pairs = size;
+            let run = corpus.start(&config).unwrap();
+            for pair in 0..size {
+                let mut game = original.clone();
+                game.pair = Some(pair);
+                game.index = pair * 2;
+                corpus.save(run, &game).unwrap();
+            }
+            corpus.finish(run, "finished", None).unwrap();
+            let read = |index, fresh| {
+                // Separate snapshot AND operation budget on every call, just
+                // like the real audit and paged reader. Only queries survive.
+                let w = work().unwrap();
+                let snapshot = corpus.db.snapshot(&w).unwrap();
+                let frame = snapshot.frame(&w);
+                let game = frame
+                    .get(GameByRunIndex {
+                        run: RunId(run),
+                        index,
+                    })
+                    .unwrap()
+                    .unwrap();
+                let before = w.used(Resource::WorkUnits);
+                let result = if fresh {
+                    let mut query = relational::GameReader::new(&frame).unwrap();
+                    relational::read_game(&frame, &game, &mut query).unwrap()
+                } else {
+                    corpus.read_game(&frame, &game).unwrap()
+                };
+                (result, w.used(Resource::WorkUnits) - before)
+            };
+            read(0, false);
+            let index = (size as u64 - 1) * 2;
+            let (warm, warm_work) = read(index, false);
+            let (rebuilt, rebuilt_work) = read(index, true);
+            assert_eq!(warm, rebuilt);
+            assert_eq!(warm.plies, original.plies);
+            eprintln!("READER_WORK games={size} retained={warm_work} rebuilt={rebuilt_work}");
+            costs.push((warm_work, rebuilt_work));
+            corpus.close().unwrap();
+        }
+        for &(warm, rebuilt) in &costs {
+            assert!(
+                warm < rebuilt,
+                "retained query must use less work: {costs:?}"
+            );
+        }
+        // Total work includes fixed per-game point reads and validation. Test
+        // scaling, not a blanket speedup that small fixtures cannot deliver.
+        assert!(
+            costs[1].0 <= costs[0].0 * 2,
+            "eight times as many games must not force another relation-sized pass: {costs:?}"
+        );
+        assert!(
+            costs[1].1 - costs[1].0 >= (costs[0].1 - costs[0].0) * 4,
+            "rebuilding must expose the relation-sized work avoided by retention: {costs:?}"
+        );
     }
 
     #[test]
@@ -1196,7 +1299,7 @@ mod tests {
                 })
                 .unwrap()
                 .unwrap();
-            assert_eq!(relational::read_game(&frame, &stored).unwrap(), g);
+            assert_eq!(corpus.read_game(&frame, &stored).unwrap(), g);
             let mut squares = std::collections::BTreeMap::new();
             let kinds = [
                 PieceKind::Pawn.id(),

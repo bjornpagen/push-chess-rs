@@ -140,9 +140,14 @@ There are no migrations or compatibility schemas.
 
 Each game and all its facts commit together with bumbledb's durable LMDB
 defaults. Work/memory budgets are renewed per operation. The writer owns no
-snapshot across a write. Readers use bounded pages; they never materialize
-the whole corpus merely to read it. A schema/storage refusal is a failure,
-not an invitation to use another backend.
+snapshot across a write. Readers return bounded game pages. The two prepared
+piece-delta queries survive pages and fresh snapshots: their first execution
+can build a relation-sized selection index, retained within bumbledb's resource
+limits. Returned trajectories remain page-bounded; index memory is not constant
+in corpus size. Relation epochs invalidate the indexes after writes, and closing
+the reader drops query state before closing the store. This is not a physical
+prefix seek or a second dataset. See [reader measurements](corpus-reader.md).
+A schema/storage refusal is a failure, not an invitation to use another backend.
 
 bumbledb has exclusive process ownership. The tournament exposes a private
 Unix socket for read-only status/report queries through its own database
