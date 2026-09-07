@@ -13,6 +13,17 @@ before/after NNUE comparison. Use the same executable/search for both weight
 versions, preserve the controls and record every game in bumbledb. This does
 not authorize resuming the older broad or repeated tournament protocol.
 
+This bounded pass is now complete: implementation pushed as `13efc6d`, 118
+Rust / 55 Python tests passing, every historical game re-audited under v1, and
+new play using the explicit v2 castling correction. The refined existing NNUE
+improved same-sample validation loss 1.11% against r2. The two fixed small
+checks (Runs 5 and 6, 128 games each) are finished and audited: r3 scored
+53.125% / 53.90625%, or 130 wins / 14 draws / 112 losses combined. This is
+promising but inconclusive; no champion/default weight was replaced. See
+[nnue-round-3.md](nnue-round-3.md) for hashes, commands, paired uncertainty and
+remaining limitations. No process is running and the 256-game plan is exhausted;
+do not repeat or extend it without another user instruction.
+
 Continue improving this generation through code review, regression tests,
 measured optimizations, exact-history failure analysis, and bounded NNUE
 refinement from audited, sealed corpus runs. Ordinary automated tests use only

@@ -101,4 +101,49 @@ in 376 nodes. No search heuristic was patched toward these preferred moves.
 
 ## Playing checks
 
-Pending the implementation commit/push. No new comparison games have started.
+Implementation and the fixed comparison plan were committed and pushed to main
+as `13efc6d` **before** either new run. Both use executable SHA256
+`c36e55384af8578b69ce2be8ec2e25efa219f8368c598b96731905226ed63c9c`,
+preserved at `data/bin/lab-c36e55384af8578b`, and the unchanged r2 / exported
+r3 weight identities above. No built-in engine or default weight was replaced.
+
+Run 5 (25 ms) finished all 128 terminal games in 22.49 seconds: **r3 won 66,
+drew 4 and lost 58**, scoring 53.125%. All 64 pairs have distinct opening
+families. Its pair-points histogram, in r3 orientation for 0/0.5/1/1.5/2 points,
+is `[8, 3, 39, 1, 13]`. The conservative 95% family bound is
+**36.15–70.10%**: encouraging direction, inconclusive strength evidence.
+
+Full replay audited 9,132 moves and 8,364 search observations in 1.172 seconds;
+all outcomes verified, no missing/capped games and no transit warnings (one
+castle). At this short budget, 81 r3 searches and 64 r2 searches had no completed
+depth/proof; those are incomplete searches, not unfinished games.
+
+Run 6 (100 ms) finished all 128 terminal games in 84.21 seconds: **r3 won 64,
+drew 10 and lost 54**, scoring 53.90625%. All 64 pairs again have distinct
+opening families. The r3 pair-points histogram is `[6, 6, 36, 4, 12]` and its
+conservative 95% family bound is **36.93–70.88%**. Replay verified 11,623 moves
+and 10,855 search observations in 1.728 seconds, with no missing/capped games
+and no transit warnings (two castles). Only four r3 / two r2 searches lacked
+a completed depth/proof; the games themselves all reached terminal outcomes.
+
+Summary, always from the refined r3 weight version's perspective:
+
+| Budget | Games | Wins | Draws | Losses | Score |
+|---|---:|---:|---:|---:|---:|
+| 25 ms | 128 | 66 | 4 | 58 | 53.125% |
+| 100 ms | 128 | 64 | 10 | 54 | 53.90625% |
+| Descriptive total | **256** | **130** | **14** | **112** | **53.515625%** |
+
+**Conclusion:** prediction loss improved, and both small playing checks lean
+in the same favorable direction. The samples do not establish a reliable
+strength gain or a new champion. The quoted intervals are per-check bounds,
+not a joint two-check guarantee; the pooled score is descriptive, not a
+promotion test. Keep r3 as a promising candidate and preserve r2 and embedded
+controls. Do not extend the sample, tune against these arena games or launch
+another campaign without a new instruction.
+
+The complete store now has 31,486 games / 2,385,428 moves / 2,196,516 search
+observations, consuming 11,327,979,520 bytes. The sole nonterminal saved game
+is still the original Run 1 cap. Both new runs are sealed and audited; all
+training and match processes have exited. No new engine architecture or
+built-in entry was added, no old run was changed, and no heartbeat was installed.
