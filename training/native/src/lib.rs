@@ -589,42 +589,131 @@ fn observations<'py>(
         .collect()
 }
 
-/// Incumbents are evaluation opponents only; self-play never calls this class.
+/// Classical search and isolated NNUE candidates, with whole-root FFI calls.
 #[pyclass(unsendable)]
 struct Opponent {
     engine: Box<dyn push_chess::engine::Engine>,
+    fingerprint: Option<u64>,
 }
-#[pymethods]
 impl Opponent {
-    #[new]
-    fn new(name: &str) -> PyResult<Self> {
-        let entry = push_chess::engines::find_engine(name)
-            .ok_or_else(|| PyValueError::new_err("unknown opponent"))?;
-        let mut engine = (entry.create)();
-        engine.new_game(Color::White, 0);
-        Ok(Self { engine })
-    }
-    #[pyo3(signature = (state, time_ms=100, nodes=0))]
-    fn choose(&mut self, state: &State, time_ms: i64, nodes: i64) -> PyResult<u32> {
+    fn search(
+        &mut self,
+        py: Python<'_>,
+        state: &State,
+        time_ms: i64,
+        nodes: i64,
+        depth: i32,
+    ) -> PyResult<(
+        push_chess::core::types::Move,
+        push_chess::core::types::SearchStats,
+    )> {
         if state.inner.white_value().is_some()
             || !(0..=3_600_000).contains(&time_ms)
             || nodes < 0
             || (time_ms == 0 && nodes == 0)
+            || !(0..=100).contains(&depth)
         {
             return Err(PyValueError::new_err("invalid position or budget"));
         }
-        let (mv, _) = self.engine.choose_move(
-            &mut state.inner.position().clone(),
-            &SearchBudget {
-                max_time_us: time_ms * 1000,
-                max_nodes: nodes,
-                ..SearchBudget::default()
-            },
-        );
-        if !state.inner.legal_moves().contains(&mv) {
+        // Clone the exact history once, then release Python during all CPU
+        // search. No Python objects, neural calls or atomics inside the tree.
+        let mut position = state.inner.position().clone();
+        let engine = &mut self.engine;
+        let result = py.detach(|| {
+            engine.choose_move(
+                &mut position,
+                &SearchBudget {
+                    max_time_us: time_ms * 1000,
+                    max_nodes: nodes,
+                    max_depth: depth,
+                    ..SearchBudget::default()
+                },
+            )
+        });
+        if !state.inner.legal_moves().contains(&result.0) {
             return Err(PyValueError::new_err("opponent returned illegal move"));
         }
-        Ok(mv.id())
+        Ok(result)
+    }
+}
+#[pymethods]
+impl Opponent {
+    #[new]
+    #[pyo3(signature = (name, network=None))]
+    fn new(name: &str, network: Option<&[u8]>) -> PyResult<Self> {
+        if let Some(bytes) = network {
+            let candidate = push_chess_lab::lab::Candidate::decode(name, bytes)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            return Ok(Self {
+                engine: candidate.create(),
+                fingerprint: Some(candidate.network_fingerprint()),
+            });
+        }
+        let entry = push_chess::engines::find_engine(name)
+            .ok_or_else(|| PyValueError::new_err("unknown opponent"))?;
+        let mut engine = (entry.create)();
+        engine.new_game(Color::White, 0);
+        let fingerprint = push_chess::engines::info(name)
+            .unwrap()
+            .neural_accumulator
+            .then(push_chess::engines::cataclysm::network_fingerprint);
+        Ok(Self {
+            engine,
+            fingerprint,
+        })
+    }
+    fn network_fingerprint(&self) -> Option<u64> {
+        self.fingerprint
+    }
+    #[pyo3(signature = (side=0, seed=0))]
+    fn new_game(&mut self, side: u8, seed: u64) -> PyResult<()> {
+        let color = match side {
+            0 => Color::White,
+            1 => Color::Black,
+            _ => return Err(PyValueError::new_err("invalid side")),
+        };
+        self.engine.new_game(color, seed);
+        Ok(())
+    }
+    #[pyo3(signature = (state, time_ms=100, nodes=0))]
+    fn choose(&mut self, py: Python<'_>, state: &State, time_ms: i64, nodes: i64) -> PyResult<u32> {
+        Ok(self.search(py, state, time_ms, nodes, 0)?.0.id())
+    }
+    #[pyo3(signature = (state, time_ms=100, nodes=0, depth=0))]
+    fn analyse<'py>(
+        &mut self,
+        py: Python<'py>,
+        state: &State,
+        time_ms: i64,
+        nodes: i64,
+        depth: i32,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let (mv, stats) = self.search(py, state, time_ms, nodes, depth)?;
+        let row = pyo3::types::PyDict::new(py);
+        row.set_item("move", mv.id())?;
+        row.set_item("score", stats.eval_cp)?;
+        row.set_item("nodes", stats.nodes)?;
+        row.set_item("depth", stats.depth_reached)?;
+        row.set_item("seldepth", stats.seldepth)?;
+        row.set_item("wall_us", stats.time_used_us)?;
+        row.set_item(
+            "complete",
+            stats.depth_reached > 0 || stats.diagnostics.mate_proof_plies.is_some_and(|n| n > 0),
+        )?;
+        row.set_item("qnodes", stats.diagnostics.qnodes)?;
+        row.set_item("tt_hits", stats.diagnostics.tt_hits)?;
+        row.set_item("proof_nodes", stats.diagnostics.proof_nodes)?;
+        row.set_item("mate_proof_plies", stats.diagnostics.mate_proof_plies)?;
+        row.set_item(
+            "pv",
+            stats
+                .pv
+                .into_iter()
+                .map(|m| m.id())
+                .collect::<Vec<_>>()
+                .into_pyarray(py),
+        )?;
+        Ok(row)
     }
 }
 
@@ -702,7 +791,13 @@ impl CorpusReader {
             row.set_item("binary", pyo3::types::PyBytes::new(py, &game.binary))?;
             let mut actions = Vec::with_capacity(g.plies.len());
             let mut columns = Vec::with_capacity(g.plies.len() * 6);
-            for p in &g.plies {
+            let mut details = Vec::with_capacity(g.plies.len() * 5);
+            let mut pv_offsets = Vec::with_capacity(g.plies.len() + 1);
+            let mut pv_actions = Vec::new();
+            let mut proofs = Vec::new();
+            let mut mates = Vec::new();
+            pv_offsets.push(0u32);
+            for (ply, p) in g.plies.iter().enumerate() {
                 actions.push(p.action);
                 let nodes = i64::try_from(p.nodes)
                     .map_err(|_| PyValueError::new_err("node counter overflow"))?;
@@ -714,6 +809,26 @@ impl CorpusReader {
                     nodes,
                     p.depth as i64,
                 ]);
+                details.extend_from_slice(&[
+                    i64::from(p.seldepth),
+                    p.wall_us,
+                    p.reported_us,
+                    i64::try_from(p.diagnostics.qnodes)
+                        .map_err(|_| PyValueError::new_err("qnode counter overflow"))?,
+                    i64::try_from(p.diagnostics.tt_hits)
+                        .map_err(|_| PyValueError::new_err("TT counter overflow"))?,
+                ]);
+                pv_actions.extend_from_slice(&p.pv);
+                pv_offsets.push(
+                    u32::try_from(pv_actions.len())
+                        .map_err(|_| PyValueError::new_err("PV page overflow"))?,
+                );
+                if let Some(nodes) = p.diagnostics.proof_nodes {
+                    proofs.extend([ply as u64, nodes]);
+                }
+                if let Some(plies) = p.diagnostics.mate_proof_plies {
+                    mates.extend([ply as u64, u64::from(plies)]);
+                }
             }
             row.set_item("moves", actions.into_pyarray(py))?;
             row.set_item(
@@ -722,9 +837,48 @@ impl CorpusReader {
                     .unwrap()
                     .into_pyarray(py),
             )?;
+            row.set_item(
+                "search_details",
+                Array::from_shape_vec((g.plies.len(), 5), details)
+                    .unwrap()
+                    .into_pyarray(py),
+            )?;
+            row.set_item("pv_offsets", pv_offsets.into_pyarray(py))?;
+            row.set_item("pv_actions", pv_actions.into_pyarray(py))?;
+            // Optional observations remain sparse (ply,value) rows at the
+            // boundary, never ambiguous zero-filled proof claims.
+            row.set_item(
+                "proof_searches",
+                Array::from_shape_vec((proofs.len() / 2, 2), proofs)
+                    .unwrap()
+                    .into_pyarray(py),
+            )?;
+            row.set_item(
+                "mate_proofs",
+                Array::from_shape_vec((mates.len() / 2, 2), mates)
+                    .unwrap()
+                    .into_pyarray(py),
+            )?;
             games.push(row);
         }
         Ok((games, page.cursor, page.done))
+    }
+    fn state(&self, py: Python<'_>, run: u64, game: u64, ply: usize) -> PyResult<State> {
+        let game = self
+            .corpus()?
+            .game(run, game)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if ply > game.trajectory.plies.len() {
+            return Err(PyValueError::new_err("ply beyond saved game"));
+        }
+        py.detach(move || -> Result<State, String> {
+            let mut state = selfplay::State::from_fen(&game.trajectory.initial_fen)?;
+            for record in game.trajectory.plies.iter().take(ply) {
+                state.play(record.action)?;
+            }
+            Ok(State { inner: state })
+        })
+        .map_err(PyValueError::new_err)
     }
     fn summary(&self) -> PyResult<String> {
         self.corpus()?

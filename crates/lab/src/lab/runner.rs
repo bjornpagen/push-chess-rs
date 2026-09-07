@@ -1,8 +1,9 @@
 use super::legal_moves as generate_legal_moves;
-use super::{Corpus, Ply, Result, Trajectory, opening_key, split, terminal};
+use super::{Corpus, Ply, Result, Roster, Trajectory, opening_key, split, terminal};
 use push_chess::core::position::start_position;
 use push_chess::core::types::*;
 use push_chess::engine::Engine;
+#[cfg(test)]
 use push_chess::engines::find_engine;
 use push_chess::game::{Outcome, adjudicate};
 use serde::{Deserialize, Serialize};
@@ -43,10 +44,12 @@ impl RunConfig {
         let matchups = self.matchups();
         matchups[pair % matchups.len()]
     }
+    /// Scheduling/resource checks. The separate immutable Roster resolves
+    /// names and models before a run can be admitted or any worker spawned.
     pub fn validate(&self) -> Result<()> {
         if self.engines.len() < 2
             || self.engines.len() > 32
-            || self.engines.iter().any(|e| find_engine(e).is_none())
+            || self.engines.iter().any(|e| e.is_empty() || e.len() > 64)
             || self
                 .engines
                 .iter()
@@ -54,7 +57,9 @@ impl RunConfig {
                 .len()
                 != self.engines.len()
         {
-            return Err("unknown engine; run lab list".into());
+            return Err(
+                "require 2..=32 distinct nonempty entrant names of at most 64 bytes".into(),
+            );
         }
         let available = std::thread::available_parallelism()?.get();
         if self.workers == 0 || self.workers > available {
@@ -265,11 +270,13 @@ fn play(
 /// One worker-owned engine cache per CPU, one bounded queue and one writer.
 /// Catch panics inside each worker so its peers stop immediately, not at join.
 pub fn generate(corpus: &mut Corpus, config: &RunConfig, stop: &AtomicBool) -> Result<u64> {
-    generate_controlled(corpus, config, stop, None)
+    let roster = Roster::builtins(&config.engines)?;
+    generate_controlled(corpus, config, &roster, stop, None)
 }
 pub fn generate_controlled(
     corpus: &mut Corpus,
     config: &RunConfig,
+    roster: &Roster,
     stop: &AtomicBool,
     control: Option<&super::control::Control>,
 ) -> Result<u64> {
@@ -277,7 +284,7 @@ pub fn generate_controlled(
     if corpus.disk_bytes()? >= config.max_bytes {
         return Err("corpus disk cap already reached".into());
     }
-    let run = corpus.start(config)?;
+    let run = corpus.start_resolved(config, roster)?;
     let started = Instant::now();
     let next = AtomicUsize::new(0);
     let workers = config.workers.min(config.total_pairs());
@@ -313,8 +320,7 @@ pub fn generate_controlled(
                                 let (a, b) = config.matchup(pair);
                                 for i in [a, b] {
                                     if engines[i].is_none() {
-                                        let mut e =
-                                            (find_engine(&config.engines[i]).unwrap().create)();
+                                        let mut e = roster.create(i);
                                         let mut warm = start_position();
                                         e.choose_move(
                                             &mut warm,

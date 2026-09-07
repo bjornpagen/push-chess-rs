@@ -107,3 +107,36 @@ def test_nnue_training_from_real_terminal_relations(tmp_path):
     assert learner.steps == 1 and restored["export_sha256"] == info["export_sha256"]
     export(path, tmp_path / "candidate.bin")
     assert sorted(p.name for p in tmp_path.iterdir()) == ["candidate.bin", "outcome.safetensors", "terminal-corpus"]
+
+
+def test_forensic_states_and_full_search_details_stay_typed(corpus):
+    all_games = [g for split in ("train", "validation", "test") for g in games(corpus, split)]
+    reader = CorpusReader(str(corpus))
+    try:
+        for game in all_games:
+            n = len(game["moves"])
+            assert game["search_details"].shape == (n,5)
+            assert game["search_details"].dtype == np.int64
+            assert game["pv_offsets"].shape == (n+1,)
+            assert game["pv_offsets"][0] == 0 and game["pv_offsets"][-1] == len(game["pv_actions"])
+            assert np.all(np.diff(game["pv_offsets"].astype(np.int64)) >= 0)
+            for key in ("proof_searches", "mate_proofs"):
+                assert game[key].ndim == 2 and game[key].shape[1] == 2 and game[key].dtype == np.uint64
+                assert np.all(game[key][:,0] < n)
+            state = State(game["initial_fen"])
+            for ply in range(n+1):
+                restored = reader.state(game["run_id"], game["game_index"], ply)
+                assert restored.fen() == state.fen() and restored.outcome() == state.outcome()
+                assert restored.legal_ids() == state.legal_ids()
+                if ply < n:
+                    start, end = game["pv_offsets"][ply:ply+2]
+                    preview = state.copy()
+                    for move in game["pv_actions"][start:end]: preview.play(int(move))
+                    state.play(int(game["moves"][ply]))
+            assert state.fen() == game["final_fen"]
+        with pytest.raises(ValueError): reader.state(999,0,0)
+        with pytest.raises(ValueError): reader.state(1,999,0)
+        with pytest.raises(ValueError): reader.state(1,0,999)
+    finally:
+        reader.close()
+    with pytest.raises(ValueError, match="closed"): reader.state(1,0,0)

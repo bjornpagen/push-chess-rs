@@ -1,7 +1,7 @@
 //! Tiny, embedded NNUE residual, trained on outcomes of whole saved games.
 //! Both color perspectives are incrementally maintained with integer arithmetic.
 use crate::core::types::*;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 pub const WIDTH: usize = 32;
 pub const FEATURES: usize = 2 * 6 * 64;
@@ -18,17 +18,41 @@ pub struct Network {
     output: [i16; WIDTH],
     pub fingerprint: u64,
 }
-static MODEL: LazyLock<Network> = LazyLock::new(|| {
-    Network::decode(include_bytes!("network.bin"))
-        .expect("embedded network has the specified shape")
+static MODEL: LazyLock<Arc<Network>> = LazyLock::new(|| {
+    Arc::new(
+        Network::decode(include_bytes!("network.bin"))
+            .expect("embedded network has the specified shape"),
+    )
 });
+
+/// Immutable weights shared by worker-owned searches. No process-global
+/// candidate installation, leaked allocation, or per-node reference counting.
+#[derive(Clone)]
+pub struct Model(Arc<Network>);
+impl Model {
+    pub const BYTES: usize = (FEATURES + 2) * WIDTH * 2;
+    pub fn embedded() -> Self {
+        Self(Arc::clone(&MODEL))
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        Network::decode(bytes)
+            .map(|n| Self(Arc::new(n)))
+            .map_err(|e| e.to_string())
+    }
+    pub fn fingerprint(&self) -> u64 {
+        self.0.fingerprint
+    }
+    pub(super) fn network(&self) -> &Network {
+        &self.0
+    }
+}
 
 impl Network {
     pub fn embedded() -> &'static Self {
         &MODEL
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        if bytes.len() != (FEATURES * WIDTH + 2 * WIDTH) * 2 {
+        if bytes.len() != Model::BYTES {
             return Err("invalid Cataclysm model shape".into());
         }
         let mut words = bytes

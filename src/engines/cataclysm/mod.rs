@@ -15,7 +15,9 @@ use crate::engine::Engine;
 use crate::engine::shared::{Buckets, SearchLimits, pick_best};
 use board::{Action, Board, pack};
 use eval::{VALUE, evaluate, piece_score};
+pub use network::Model;
 use network::Network;
+use std::borrow::Cow;
 
 const MATE: i32 = 30_000;
 const WIN: i32 = 29_800;
@@ -91,6 +93,8 @@ fn decode(v: i16, ply: usize) -> i32 {
 pub type Cataclysm = Search<0>;
 
 pub struct Search<const V: usize> {
+    name: Cow<'static, str>,
+    model: Model,
     table: Buckets<Entry, 4>,
     age: u8,
     history: Vec<i32>,
@@ -116,8 +120,16 @@ impl<const V: usize> Search<V> {
 
     /// Fixed choices bound worker memory; one table is retained for the game.
     pub fn with_hash_size(size: HashSize) -> Self {
+        Self::with_model(experiments::PROFILES[V].name, size, Model::embedded())
+    }
+
+    /// Model ownership is fixed for this search's lifetime. Its TT and history
+    /// can never contain results from a previous candidate's evaluation.
+    pub fn with_model(name: impl Into<Cow<'static, str>>, size: HashSize, model: Model) -> Self {
         assert!(V < experiments::PROFILES.len(), "unknown Cataclysm profile");
         Self {
+            name: name.into(),
+            model,
             table: Buckets::new(size.bytes()),
             age: 0,
             history: vec![0; 2 * 3 * 64 * 64],
@@ -135,6 +147,10 @@ impl<const V: usize> Search<V> {
             qnodes: 0,
             hits: 0,
         }
+    }
+
+    pub fn model_fingerprint(&self) -> u64 {
+        self.model.fingerprint()
     }
 
     fn tick(&mut self, ply: usize) -> bool {
@@ -637,11 +653,7 @@ impl<const V: usize> Search<V> {
 
 impl<const V: usize> Engine for Search<V> {
     fn name(&self) -> &str {
-        if V == 0 {
-            "Cataclysm 002"
-        } else {
-            experiments::PROFILES[V].name
-        }
+        &self.name
     }
     fn new_game(&mut self, _: Color, _: u64) {
         self.table.fill([Entry::default(); 4]);
@@ -672,7 +684,10 @@ impl<const V: usize> Engine for Search<V> {
                 },
             );
         };
-        let mut board = Board::new(pos);
+        // One shared-owner clone per root, never per node. The board borrows
+        // weights locally so recursive mutable search does not borrow self.
+        let model = self.model.clone();
+        let mut board = Board::with_model(pos, model.network());
         let proof_cap = if budget.max_depth > 0 {
             budget.max_depth
         } else {
@@ -737,7 +752,7 @@ impl<const V: usize> Engine for Search<V> {
             }
         }
         let mut pv = vec![best];
-        let mut view = Board::new(pos);
+        let mut view = Board::with_model(pos, model.network());
         let mut actions = Vec::new();
         let mut id = pack(best);
         let mut seen = Vec::new();
@@ -800,7 +815,11 @@ pub fn create_experiment<const V: usize>() -> Box<dyn Engine> {
 /// Differential oracle used by the all-history study and regression tests.
 /// Checks every pseudo-legal move, exact FEN, hash, check state, and rollback.
 pub fn verify_rules(pos: &Position) -> Result<usize, String> {
-    let mut board = Board::new(pos);
+    verify_rules_with_model(pos, &Model::embedded())
+}
+
+pub fn verify_rules_with_model(pos: &Position, model: &Model) -> Result<usize, String> {
+    let mut board = Board::with_model(pos, model.network());
     let mut actions = Vec::new();
     board.generate(&mut actions);
     let mut core = Vec::new();
@@ -831,7 +850,7 @@ pub fn verify_rules(pos: &Position) -> Result<usize, String> {
                 return Err(format!("check mismatch {:?}: {}", action.mv, pos.to_fen()));
             }
         }
-        let rebuilt = Board::new(&reference);
+        let rebuilt = Board::with_model(&reference, model.network());
         if board.men != rebuilt.men
             || board.occupied != rebuilt.occupied
             || board.mg != rebuilt.mg
@@ -905,6 +924,66 @@ mod tests {
         assert!(stats.nodes <= 2000);
         assert_eq!(pos.to_fen(), before);
         assert!(pos.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn candidate_network_is_fixed_shared_and_used_by_real_search() {
+        let model = Model::decode(learning::CONTROL_BYTES).unwrap();
+        let other = model.clone();
+        assert!(std::ptr::eq(model.network(), other.network()));
+        let mut control = Cataclysm::with_hash_size(HashSize::MiB4);
+        let mut candidate = Cataclysm::with_model("control-copy", HashSize::MiB4, model);
+        let budget = SearchBudget {
+            max_nodes: 2048,
+            ..SearchBudget::default()
+        };
+        let mut state = crate::selfplay::State::default();
+        for ply in 0..12 {
+            let mut pos = state.position().clone();
+            control.new_game(Color::White, 0);
+            candidate.new_game(Color::White, 0);
+            let (a, sa) = control.choose_move(&mut pos, &budget);
+            let (b, sb) = candidate.choose_move(&mut pos, &budget);
+            assert_eq!(
+                (a, sa.nodes, sa.eval_cp, sa.depth_reached, sa.pv),
+                (b, sb.nodes, sb.eval_cp, sb.depth_reached, sb.pv)
+            );
+            assert_eq!(pos.to_fen(), state.position().to_fen());
+            let legal = state.legal_moves();
+            if legal.is_empty() {
+                break;
+            }
+            state
+                .play(legal[(ply * 19 + 7) % legal.len()].id())
+                .unwrap();
+        }
+        let zero = vec![0; Model::BYTES];
+        let zero_model = Model::decode(&zero).unwrap();
+        let expected = learning::Evaluator::decode(&zero).unwrap();
+        let mut different =
+            Cataclysm::with_model("zero-fixture", HashSize::MiB4, zero_model.clone());
+        assert_ne!(different.model_fingerprint(), control.model_fingerprint());
+        let mut pos = state.position().clone();
+        // A one-node interruption reports the initial static score. This pins
+        // that the actual search board uses this candidate, not the control.
+        let (_, stats) = different.choose_move(
+            &mut pos,
+            &SearchBudget {
+                max_nodes: 1,
+                ..SearchBudget::default()
+            },
+        );
+        assert_eq!(stats.eval_cp, expected.evaluate(&pos));
+        assert_eq!(stats.depth_reached, 0);
+        assert_eq!(Network::embedded().fingerprint, control.model_fingerprint());
+        for fen in [
+            "8/7k/4RB2/8/4N3/8/8/K7 w - - 0 1",
+            "7k/P7/R7/8/8/8/8/K7 w - - 0 1",
+            "r3k2r/8/8/3pP3/8/8/8/R3K2R w KQkq d6 0 1",
+        ] {
+            verify_rules_with_model(&Position::try_from_fen(fen).unwrap(), &zero_model).unwrap();
+            verify_rules_with_model(&Position::try_from_fen(fen).unwrap(), &other).unwrap();
+        }
     }
 
     #[test]

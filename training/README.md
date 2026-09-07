@@ -87,3 +87,46 @@ optimizer-matched weights for a new seeded pass, not a bit-exact replay cursor.
 Export produces the separate 49,280-byte i16 candidate. It does **not** install
 the network, edit the embedded control, or promote it. Require fresh paired
 playing-strength tests at multiple budgets before adopting a candidate.
+
+An exported candidate can enter those real-search comparisons without editing
+the control or recompiling weights into the engine. Build/verify/commit the
+runner first, and wait for the active database owner to finish:
+
+```sh
+target/release/lab tournament --db data/corpus --engines cataclysm,aurora-r2 \
+  --nnue aurora-r2=models/residual-r2.bin --pairs 100 --workers 12 \
+  --time-ms 100 --purpose arena --seed 2026090701 --max-seconds 3600 --max-gib 50
+```
+
+Use a fresh seed for each independent confirmation. Changed network bytes need
+a new generation name; the corpus rejects relabelling an existing binary/name
+identity. Multiple `--nnue NAME=PATH` options are allowed. Every worker owns its
+search scratch and borrows shared immutable weights; no Python or GPU calls
+occur inside classical search.
+
+For root-level investigation, `Opponent("aurora-r2", network_bytes)` loads an
+isolated candidate. `new_game()` clears search history; `analyse(state,
+time_ms=0, nodes=4096)` returns a legal selected move, score, node/depth/cost
+observations, proof observations and an owned u32 PV array. It releases Python
+during CPU search. No candidate may use a built-in name. No game is persisted
+by these diagnostic calls; tournament generation is still the durable path.
+
+## Typed forensic access
+
+`CorpusReader.state(run,game,ply)` restores the actual prefix, including draw
+history, rather than constructing a history-free state from a FEN. This is an
+explicit forensic API, including quarantined runs. Do not use it to bypass
+training splits; NNUE training always uses eligible `page()` results.
+
+Besides `moves` and the six existing `analysis` columns, a game page supplies:
+
+- `search_details`: i64 columns `seldepth, wall_us, reported_us, qnodes, tt_hits`;
+  use `analysis[:,2]` to distinguish actual searches from opening rows.
+- `pv_offsets` and `pv_actions`: owned u32 arrays; the PV for ply p is the
+  actions slice `[pv_offsets[p]:pv_offsets[p+1]]`.
+- `proof_searches` and `mate_proofs`: sparse u64 `(ply,nodes)` and `(ply,plies)`
+  rows. Absence is not a fabricated zero-node proof.
+
+PVs/proofs are observations reported by the engine, not independently verified
+mate certificates. All these arrays are derived from normalized bumbledb facts
+and remain in memory; they do not create another replay or analysis datastore.

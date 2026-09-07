@@ -53,8 +53,8 @@ impl Action {
     }
 }
 
-pub struct Board {
-    pub model: &'static Network,
+pub struct Board<'net> {
+    pub model: &'net Network,
     pub pos: Position,
     pub men: [[u64; 7]; 2],
     pub occupied: [u64; 2],
@@ -82,9 +82,14 @@ pub struct Snapshot {
     material: [i32; 2],
 }
 
-impl Board {
+impl Board<'static> {
     pub fn new(pos: &Position) -> Self {
-        let model = Network::embedded();
+        Self::with_model(pos, Network::embedded())
+    }
+}
+
+impl<'net> Board<'net> {
+    pub fn with_model(pos: &Position, model: &'net Network) -> Self {
         let mut view = Position::empty();
         view.board = pos.board;
         view.side_to_move = pos.side_to_move;

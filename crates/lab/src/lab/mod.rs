@@ -1,11 +1,13 @@
 pub mod control;
 mod corpus;
 mod relational;
+mod roster;
 mod runner;
 pub mod schema;
 mod statistics;
 
 pub use corpus::{Corpus, CorpusGame, CorpusPage, digest_file};
+pub use roster::{Candidate, Roster};
 pub use runner::{RunConfig, generate, generate_controlled};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;

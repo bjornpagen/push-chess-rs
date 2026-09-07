@@ -1,7 +1,7 @@
 //! Sole durable source of games and observations. One game is one atomic
 //! bumbledb change set; reads copy at most a page of complete trajectories.
 use super::schema::*;
-use super::{Result, RunConfig, Trajectory, relational};
+use super::{Result, Roster, RunConfig, Trajectory, relational};
 use bumbledb::{
     Admission, ApplyExpected, ApplyOutcome, ChangeSet, ChangeSetBuilder, CloseReport, Db,
     ExecutionPolicy, Fact, WorkContext,
@@ -164,8 +164,13 @@ impl Corpus {
             ApplyOutcome::Moved { .. } => Err("corpus changed under write".into()),
         }
     }
+    #[cfg(test)]
     pub(super) fn start(&self, config: &RunConfig) -> Result<u64> {
+        self.start_resolved(config, &Roster::builtins(&config.engines)?)
+    }
+    pub(super) fn start_resolved(&self, config: &RunConfig, roster: &Roster) -> Result<u64> {
         config.validate()?;
+        roster.validate(&config.engines)?;
         let w = work()?;
         let id = {
             let snapshot = self.db.snapshot(&w)?;
@@ -180,6 +185,7 @@ impl Corpus {
             &mut draft,
             RunId(id),
             config,
+            roster,
             digest_file(&std::env::current_exe()?)?,
             now()?,
         )?;
@@ -447,6 +453,29 @@ impl Corpus {
             done: true,
         })
     }
+
+    /// Explicit forensic access to one saved game, including quarantined runs.
+    /// Training consumers must use the split/eligibility-filtered page API.
+    pub fn game(&self, run: u64, index: u64) -> Result<CorpusGame> {
+        let w = work()?;
+        let snapshot = self.db.snapshot(&w)?;
+        let frame = snapshot.frame(&w);
+        let run = frame
+            .get(RunById { id: RunId(run) })?
+            .ok_or("unknown run")?;
+        let game = frame
+            .get(GameByRunIndex { run: run.id, index })?
+            .ok_or("unknown saved game")?;
+        let trajectory = relational::read_game(&frame, &game)?;
+        trajectory.validate()?;
+        Ok(CorpusGame {
+            run_id: run.id.0,
+            trajectory,
+            trajectory_key: game.trajectory,
+            binary: run.binary,
+            rules: run.rules.into(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -645,6 +674,75 @@ mod tests {
         .unwrap();
         assert_eq!(corpus.report(run).unwrap()["status"], "interrupted");
         assert_eq!(corpus.summary().unwrap()["totals"]["games"], 2);
+        corpus.close().unwrap();
+    }
+
+    #[test]
+    fn candidate_tournament_records_actual_identity_and_rejects_name_reuse() {
+        use super::super::{Candidate, generate_controlled};
+        let (_dir, mut corpus) = create();
+        let mut config = config();
+        config.engines = vec!["cataclysm".into(), "aurora-fixture".into()];
+        config.pairs = 2;
+        config.workers = 2;
+        let bytes = push_chess::engines::cataclysm::learning::CONTROL_BYTES;
+        let roster = Roster::resolve(
+            &config.engines,
+            vec![Candidate::decode("aurora-fixture", bytes).unwrap()],
+        )
+        .unwrap();
+        let run = generate_controlled(
+            &mut corpus,
+            &config,
+            &roster,
+            &std::sync::atomic::AtomicBool::new(false),
+            None,
+        )
+        .unwrap();
+        assert_eq!(corpus.verify(run).unwrap()["verified_games"], 4);
+        let report = corpus.report(run).unwrap();
+        assert_eq!(report["matchups"][0]["a"], "cataclysm");
+        assert_eq!(report["matchups"][0]["b"], "aurora-fixture");
+        let w = work().unwrap();
+        {
+            let snapshot = corpus.db.snapshot(&w).unwrap();
+            let frame = snapshot.frame(&w);
+            let binary = digest_file(&std::env::current_exe().unwrap()).unwrap();
+            for (slot, expected) in roster.entries.iter().enumerate() {
+                let entrant = frame
+                    .get(EntrantByRunSlot {
+                        run: RunId(run),
+                        slot: slot as u64,
+                    })
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(entrant.engine.0, expected.identity(binary));
+                let net = frame
+                    .get(EngineNetworkByEngine {
+                        engine: entrant.engine,
+                    })
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(net.fingerprint, expected.network_fingerprint().unwrap());
+            }
+        }
+        let mut changed = bytes.to_vec();
+        changed[0] ^= 1;
+        let different = Roster::resolve(
+            &config.engines,
+            vec![Candidate::decode("aurora-fixture", &changed).unwrap()],
+        )
+        .unwrap();
+        // Engine(binary,name)->Engine prevents relabelling the same named
+        // contender with different weights; even the Run insert rolls back.
+        assert!(corpus.start_resolved(&config, &different).is_err());
+        assert_eq!(
+            corpus.summary().unwrap()["runs"].as_array().unwrap().len(),
+            1
+        );
+        let second = corpus.start_resolved(&config, &roster).unwrap();
+        assert_eq!(second, 2);
+        corpus.finish(second, "finished", None).unwrap();
         corpus.close().unwrap();
     }
 

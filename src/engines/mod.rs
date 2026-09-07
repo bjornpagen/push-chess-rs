@@ -73,14 +73,14 @@ pub fn find_engine(name: &str) -> Option<&'static EngineEntry> {
 }
 
 #[derive(serde::Serialize)]
-pub struct EngineInfo {
-    pub name: &'static str,
+pub struct EngineInfo<'a> {
+    pub name: &'a str,
     pub lineage: &'static str,
     pub hypothesis: &'static str,
     pub neural_accumulator: bool,
     pub neural_evaluation: bool,
 }
-pub fn info(name: &str) -> Option<EngineInfo> {
+pub fn info(name: &str) -> Option<EngineInfo<'static>> {
     if let Some(p) = cataclysm::experiments::PROFILES
         .iter()
         .find(|p| p.name == name)

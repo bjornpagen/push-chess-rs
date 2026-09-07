@@ -78,6 +78,36 @@ def test_half_integer_rounding_and_parameter_clipping_match_export():
         np.testing.assert_array_equal(nnue.decode(data)[key], expected)
 
 
+def test_candidate_actual_search_isolated_identity_and_bounded_analysis():
+    from pushzero._native import Opponent
+    with pytest.raises(ValueError, match="cannot replace"): Opponent("cataclysm", nnue_control())
+    with pytest.raises(ValueError): Opponent("aurora", b"bad")
+    control, candidate = Opponent("cataclysm"), Opponent("control-copy", nnue_control())
+    assert control.network_fingerprint() == candidate.network_fingerprint()
+    assert Opponent("astra").network_fingerprint() is None
+    for state in positions(8):
+        control.new_game()
+        candidate.new_game()
+        original = state.fen()
+        a = control.analyse(state, time_ms=0, nodes=1024)
+        b = candidate.analyse(state, time_ms=0, nodes=1024)
+        for key in a:
+            if key != "wall_us": np.testing.assert_array_equal(a[key], b[key])
+        assert a["move"] in state.legal_ids() and a["nodes"] <= 1024
+        assert state.fen() == original and a["pv"].dtype == np.uint32
+        line = state.copy()
+        for move in a["pv"]: line.play(int(move))
+    zero = bytes(nnue.MODEL_BYTES)
+    different = Opponent("zero-fixture", zero)
+    assert different.network_fingerprint() != control.network_fingerprint()
+    state = positions(4)[-1]
+    row = different.analyse(state, time_ms=0, nodes=1)
+    assert row["score"] == nnue_evaluate(zero, [state])[0] and not row["complete"]
+    with pytest.raises(ValueError): candidate.analyse(state, time_ms=0, nodes=0)
+    with pytest.raises(ValueError): candidate.analyse(state, depth=101)
+    with pytest.raises(ValueError): candidate.new_game(side=2)
+
+
 @pytest.mark.parametrize("jit", [False, True])
 def test_tiny_update_export_and_optimizer_resume_are_exact(tmp_path, jit):
     states = positions(4)

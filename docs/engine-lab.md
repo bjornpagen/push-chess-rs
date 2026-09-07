@@ -28,6 +28,13 @@ All seven Astra-lineage engines load no network and maintain no accumulator.
 Compare their experimental features against Sentinel to isolate effects of
 its correctness guards. Abacus is deliberately not described as neural-free.
 
+Outcome-refined NNUE artifacts enter as separately named candidates using the
+unchanged Cataclysm control search and baseline. `--nnue NAME=PATH` may repeat;
+the name must occur in `--engines`, or `--engines all` includes all supplied
+candidates alongside the built-ins. Built-in names cannot be overridden.
+Resolve and decode artifacts before opening the store. Malformed, missing,
+duplicate or unused candidates are errors; there is no substitute network.
+
 ## Shared mechanisms and memory
 
 The two search families share SearchLimits, fixed-width Buckets, and explicit
@@ -48,6 +55,11 @@ database pages. The embedded network is shared once per process. There is one
 thread per selected worker; macOS places work across heterogeneous cores.
 Hard affinity, unsafe SIMD, custom allocators and speculative prefetching are
 not introduced without measurements.
+
+Candidate weights likewise have one immutable shared owner per artifact.
+Each root borrows a network through its board; recursive node search performs
+no reference counting. A search's model cannot be swapped under its TT/history.
+Candidates retain the same 32-MiB worker-owned tables as controls.
 
 A bounded channel (two game slots per worker) hands owned trajectories to one
 writer. A failed move or worker panic stops the campaign; no replacement move
@@ -76,7 +88,13 @@ not replace its decomposed facts.
 | Played transitions | Move, PieceRemoved, PiecePlaced |
 | Search evidence | Analysis, ordered PvStep facts, ProofSearch, MateProof |
 
-An engine's binary/name identity is shared between campaigns. Setups and
+An engine's binary/name identity is shared between campaigns. Candidate engine
+IDs additionally bind the full SHA256 of the supplied network bytes. The
+existing `Engine(binary,name)->Engine` dependency rejects reusing one name
+with different weights under the same executable, atomically, including the
+attempted run insert. Use a fresh generation name for changed weights. The
+EngineNetwork checksum comes from the actual loaded model, not the embedded
+control. This requires no schema change or migration. Setups and
 actions are shared dictionaries. Pair stores entrant slots; Game stores the
 pair and color orientation, not duplicated player descriptions. Position
 stores side, clocks and a check hash. Board occupancy is the initial piece
@@ -124,6 +142,12 @@ database field or a game transfer format. Native Python pages contain typed
 metadata and owned NumPy action/analysis arrays; presentation FENs are derived
 from relational facts when crossing that boundary.
 
+Pages also expose search cost columns, CSR-encoded PV actions, and sparse
+`(ply,value)` proof observations. `CorpusReader.state(run,game,ply)` explicitly
+reconstructs a saved position with its exact preceding history for forensic
+analysis. It can inspect quarantined data; it is deliberately not a training
+eligibility shortcut. The split-filtered page API remains the training source.
+
 ## Data and experimental hygiene
 
 The first four full action IDs define an opening family, with stable 80/10/10
@@ -151,8 +175,9 @@ bounded scan, reservoir-samples completed search examples, learns a one-hot
 teacher move and uses only terminal WDL for the value target. Teacher scores
 are not assumed calibrated across evaluators.
 
-Reports contain wins/draws/losses and conservative score bounds accounting for
-unknown/missing games. They are descriptive, not Elo or confidence intervals.
+Reports contain wins/draws/losses and score bounds accounting for unknown or
+missing games, plus paired opening-family fixed-sample Hoeffding intervals.
+The intervals assume independent families and are not sequential stopping rules.
 Promotion requires paired opening-family analysis, multiple-testing care,
 a separate held-out replication, and deeper-budget confirmation.
 
@@ -164,8 +189,8 @@ a separate held-out replication, and deeper-budget confirmation.
 4. Verify live status, full replay, search completion and database growth.
 5. Start the larger corpus campaign with explicit CPU/time/disk/game limits.
 
-A practical first campaign: all 15 engines, 500 pairs per matchup (105,000
+A practical first campaign: all 15 engines, 100 pairs per matchup (21,000
 scheduled games), 12 workers, 100 ms/move, six opening plies, 512-ply cap,
-24-hour cap and 50-GiB store cap. Actual throughput/quality must be measured;
-the number scheduled is not a promise that all games finish within a day.
+eight-hour cap and 50-GiB store cap. Actual throughput/quality must be measured;
+the number scheduled is not a promise that all games finish within that cap.
 No automatic engine promotion or neural training occurs.

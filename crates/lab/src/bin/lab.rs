@@ -1,5 +1,5 @@
 //! Explicit, bounded work. bumbledb is the sole durable game/analysis store.
-use push_chess_lab::lab::{Corpus, RunConfig, control, generate_controlled};
+use push_chess_lab::lab::{Candidate, Corpus, Roster, RunConfig, control, generate_controlled};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{
@@ -14,6 +14,7 @@ lab tournament --db DIRECTORY --engines all|cataclysm,kinetic,astra
   --pairs N --workers N (--nodes N | --time-ms N)
   [--purpose corpus|arena] [--seed 1] [--opening-plies 6] [--max-plies 512]
   [--max-seconds 86400] [--max-gib 50]
+  [--nnue NAME=NETWORK.bin] (repeatable; distinct names, cannot replace controls)
 lab summary --db DIRECTORY
 lab status --db DIRECTORY [--run N]  (live tournament, same database owner)
 lab report --db DIRECTORY --run N
@@ -49,15 +50,23 @@ fn main() -> Result<()> {
     let mut input = std::env::args().skip(1);
     let command = input.next().unwrap_or_else(|| "help".into());
     let mut args = BTreeMap::new();
+    let mut networks = Vec::new();
     while let Some(key) = input.next() {
         let key = key
             .strip_prefix("--")
             .ok_or("expected --option value")?
             .to_owned();
         let value = input.next().ok_or("missing option value")?;
+        if key == "nnue" {
+            networks.push(value);
+            continue;
+        }
         if args.insert(key, value).is_some() {
             return Err("duplicate option".into());
         }
+    }
+    if command != "tournament" && !networks.is_empty() {
+        return Err("--nnue is only valid for tournaments".into());
     }
     if command == "help" {
         no_extra(&args)?;
@@ -84,11 +93,19 @@ fn main() -> Result<()> {
         }
         "tournament" => {
             let engines = take(&mut args, "engines")?;
+            let candidates: Vec<_> = networks
+                .iter()
+                .map(|value| {
+                    let (name, path) = value.split_once('=').ok_or("--nnue requires NAME=PATH")?;
+                    Candidate::load(name, Path::new(path))
+                })
+                .collect::<Result<_>>()?;
             let config = RunConfig {
                 engines: if engines == "all" {
                     push_chess::engines::ENGINE_REGISTRY
                         .iter()
                         .map(|e| e.name.to_owned())
+                        .chain(candidates.iter().map(|c| c.name().to_owned()))
                         .collect()
                 } else {
                     engines.split(',').map(str::to_owned).collect()
@@ -108,12 +125,13 @@ fn main() -> Result<()> {
             };
             no_extra(&args)?;
             config.validate()?;
+            let roster = Roster::resolve(&config.engines, candidates)?;
             let stop = Arc::new(AtomicBool::new(false));
             let signal = stop.clone();
             ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))?;
             let mut corpus = Corpus::open(Path::new(&path))?;
             let control = control::Control::bind(Path::new(&path))?;
-            let result = generate_controlled(&mut corpus, &config, &stop, Some(&control))
+            let result = generate_controlled(&mut corpus, &config, &roster, &stop, Some(&control))
                 .and_then(|run| corpus.report(run));
             corpus.close()?;
             result?

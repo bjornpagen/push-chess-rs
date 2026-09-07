@@ -2,7 +2,7 @@
 //! local to the engine. Text encodings exist only at external presentation.
 use super::corpus::{ending_id, ending_name, insert, split_id, unhex, white_value};
 use super::schema::*;
-use super::{Ply, Result, RunConfig, Trajectory, legal_moves};
+use super::{Ply, Result, Roster, RunConfig, Trajectory, legal_moves};
 use bumbledb::{BindValue, ChangeSetBuilder, ReadFrame};
 use push_chess::core::{position::Position as Board, types as core};
 use sha2::{Digest, Sha256};
@@ -104,6 +104,7 @@ pub(super) fn write_config(
     draft: &mut ChangeSetBuilder<'_>,
     id: RunId,
     c: &RunConfig,
+    roster: &Roster,
     binary: [u8; 32],
     now: u64,
 ) -> Result<()> {
@@ -150,18 +151,15 @@ pub(super) fn write_config(
             },
         )?;
     }
-    for (slot, name) in c.engines.iter().enumerate() {
-        let info = push_chess::engines::info(name).ok_or("unknown entrant")?;
-        let mut digest = Sha256::new();
-        digest.update(binary);
-        digest.update(name.as_bytes());
-        let engine = EngineId(digest.finalize().into());
+    for (slot, entrant) in roster.entries.iter().enumerate() {
+        let info = entrant.info();
+        let engine = EngineId(entrant.identity(binary));
         insert(
             draft,
             &Engine {
                 id: engine,
                 binary,
-                name,
+                name: &entrant.name,
                 lineage: info.lineage,
                 hypothesis: info.hypothesis,
                 neural_accumulator: info.neural_accumulator,
@@ -176,12 +174,12 @@ pub(super) fn write_config(
                 engine,
             },
         )?;
-        if info.neural_accumulator {
+        if let Some(fingerprint) = entrant.network_fingerprint() {
             insert(
                 draft,
                 &EngineNetwork {
                     engine,
-                    fingerprint: push_chess::engines::cataclysm::network_fingerprint(),
+                    fingerprint,
                 },
             )?;
         }
