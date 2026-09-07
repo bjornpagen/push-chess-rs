@@ -80,3 +80,11 @@ have both colors and no missing/unknown outcomes. Twelve workers were requested;
 the runner capped this tiny workload at its ten available opening pairs. The
 larger arena has enough pairs to use all twelve. No strength conclusion is
 drawn from this one-pair smoke test.
+
+The full arena started as **Run 4**, seed `2026090703`, with 10,000 scheduled
+games and all 12 workers. Its fixed executable SHA256 is
+`f072dbca075b1775f5f007cf54bc19c850ea8e713290238e3004b3db9b0c905f` and candidate
+bytes have the export digest above. Live progress must come from
+`lab status --db data/corpus --run 4` through the owning process; never reopen
+the live store in Python. The disposable log is `data/arena-r2.log`. Audit after
+the owner exits and inspect the sealed report before choosing any follow-up.
