@@ -542,7 +542,7 @@ struct Opponent {
 impl Opponent {
     #[new]
     fn new(name: &str) -> PyResult<Self> {
-        let entry = push_chess::candidates::find_engine(name)
+        let entry = push_chess::engines::find_engine(name)
             .ok_or_else(|| PyValueError::new_err("unknown opponent"))?;
         let mut engine = (entry.create)();
         engine.new_game(Color::White, 0);
@@ -572,12 +572,114 @@ impl Opponent {
     }
 }
 
+/// One FFI crossing per complete-game page; owned arrays, no JSON payloads.
+type PythonCorpusPage<'py> = (Vec<Bound<'py, pyo3::types::PyDict>>, (u64, u64), bool);
+#[pyclass(unsendable)]
+struct CorpusReader {
+    inner: Option<push_chess_lab::lab::Corpus>,
+}
+impl CorpusReader {
+    fn corpus(&self) -> PyResult<&push_chess_lab::lab::Corpus> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("corpus reader is closed"))
+    }
+}
+#[pymethods]
+impl CorpusReader {
+    #[new]
+    fn new(path: &str) -> PyResult<Self> {
+        Ok(Self {
+            inner: Some(
+                push_chess_lab::lab::Corpus::open(std::path::Path::new(path))
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?,
+            ),
+        })
+    }
+    #[pyo3(signature = (split="train", after=(0,0), limit=8))]
+    fn page<'py>(
+        &self,
+        py: Python<'py>,
+        split: &str,
+        after: (u64, u64),
+        limit: usize,
+    ) -> PyResult<PythonCorpusPage<'py>> {
+        let page = self
+            .corpus()?
+            .page(split, after, limit)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut games = Vec::with_capacity(page.games.len());
+        for game in page.games {
+            let g = game.trajectory;
+            let row = pyo3::types::PyDict::new(py);
+            row.set_item("run_id", game.run_id)?;
+            row.set_item("game_index", g.index)?;
+            row.set_item("initial_fen", g.initial_fen)?;
+            row.set_item("final_fen", g.final_fen)?;
+            row.set_item("white", g.white)?;
+            row.set_item("black", g.black)?;
+            row.set_item("opening_key", g.opening_key)?;
+            row.set_item(
+                "trajectory_key",
+                pyo3::types::PyBytes::new(py, &game.trajectory_key),
+            )?;
+            row.set_item("white_value", g.white_value)?;
+            row.set_item("split", g.split)?;
+            row.set_item("termination", g.termination)?;
+            row.set_item("rules", game.rules)?;
+            row.set_item("binary", pyo3::types::PyBytes::new(py, &game.binary))?;
+            let mut actions = Vec::with_capacity(g.plies.len());
+            let mut columns = Vec::with_capacity(g.plies.len() * 6);
+            for p in &g.plies {
+                actions.push(p.action);
+                let nodes = i64::try_from(p.nodes)
+                    .map_err(|_| PyValueError::new_err("node counter overflow"))?;
+                columns.extend_from_slice(&[
+                    p.side as i64,
+                    p.score.unwrap_or(0) as i64,
+                    i64::from(p.score.is_some()),
+                    i64::from(p.search_complete),
+                    nodes,
+                    p.depth as i64,
+                ]);
+            }
+            row.set_item("moves", actions.into_pyarray(py))?;
+            row.set_item(
+                "analysis",
+                Array::from_shape_vec((g.plies.len(), 6), columns)
+                    .unwrap()
+                    .into_pyarray(py),
+            )?;
+            games.push(row);
+        }
+        Ok((games, page.cursor, page.done))
+    }
+    fn summary(&self) -> PyResult<String> {
+        self.corpus()?
+            .summary()
+            .map(|v| v.to_string())
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+    fn close(&mut self) -> PyResult<()> {
+        if let Some(corpus) = &self.inner {
+            corpus
+                .close()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        }
+        // bumbledb's directory ownership belongs to the Db value. Release it
+        // now, not when Python eventually collects this wrapper.
+        self.inner = None;
+        Ok(())
+    }
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<State>()?;
     m.add_class::<SearchBatch>()?;
     m.add_class::<SearchRuntime>()?;
     m.add_class::<Opponent>()?;
+    m.add_class::<CorpusReader>()?;
     m.add_function(wrap_pyfunction!(observations, m)?)?;
     m.add("RULES_VERSION", selfplay::RULES_VERSION)?;
     m.add("ENCODING_VERSION", selfplay::ENCODING_VERSION)?;

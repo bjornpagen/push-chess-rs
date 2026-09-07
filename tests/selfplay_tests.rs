@@ -207,7 +207,6 @@ fn capacity_is_an_error_and_stop_still_evaluates_the_root() {
     assert!((result.policy.iter().sum::<f32>() - 1.).abs() < 1e-5);
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn persistent_pool_matches_serial_and_restarts_cleanly() {
     use push_chess::selfplay::{SearchOptions, SearchRoot, SearchRuntime};

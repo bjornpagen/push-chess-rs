@@ -1,9 +1,9 @@
-use push_chess::candidates::ENGINE_REGISTRY;
 use push_chess::core::children::{LendingIterator, PseudoLegalChildren};
 use push_chess::core::movegen::generate_legal_moves;
 use push_chess::core::position::{Position, start_position};
 use push_chess::core::push::{resolve_knight_push, resolve_push};
 use push_chess::core::types::*;
+use push_chess::engines::ENGINE_REGISTRY;
 
 fn position(fen: &str) -> Position {
     let mut position = Position::default();

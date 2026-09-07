@@ -1,5 +1,6 @@
 use crate::core::position::Position;
 use crate::core::types::*;
+pub mod shared;
 
 /// Engine trait — equivalent to C++ Engine base class.
 /// Each engine implements this to provide its search algorithm.

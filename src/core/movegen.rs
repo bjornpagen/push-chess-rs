@@ -46,19 +46,9 @@ fn needs_promotion(pos: &Position, info: &PushPlan, us: Color) -> bool {
 }
 
 /// Add a move (or 4 promotion moves) to the output list.
-fn add_move(
-    out: &mut impl MoveSink,
-    pos: &Position,
-    info: &PushPlan,
-    from: Square,
-    to: Square,
-    path_kind: u8,
-    stop_index: u8,
-    special: SpecialMove,
-    us: Color,
-) {
+fn add_move(out: &mut impl MoveSink, pos: &Position, info: &PushPlan, mv: Move, us: Color) {
     if needs_promotion(pos, info, us) {
-        for promo in [
+        for promo_piece in [
             PieceType::Queen,
             PieceType::Rook,
             PieceType::Bishop,
@@ -66,28 +56,15 @@ fn add_move(
         ] {
             out.emit(
                 Move {
-                    from,
-                    to,
-                    path_kind,
-                    stop_index,
                     special: SpecialMove::Promotion,
-                    promo_piece: promo,
+                    promo_piece,
+                    ..mv
                 },
                 Some(info),
             );
         }
     } else {
-        out.emit(
-            Move {
-                from,
-                to,
-                path_kind,
-                stop_index,
-                special,
-                promo_piece: PieceType::None,
-            },
-            Some(info),
-        );
+        out.emit(mv, Some(info));
     }
 }
 
@@ -117,7 +94,19 @@ fn gen_slider_moves(
                 break;
             };
 
-            add_move(out, pos, &info, from, to, 0, stop, SpecialMove::None, us);
+            add_move(
+                out,
+                pos,
+                &info,
+                Move {
+                    from,
+                    to,
+                    path_kind: 0,
+                    stop_index: stop,
+                    ..Move::default()
+                },
+                us,
+            );
 
             if info.captured().is_some() {
                 break;
@@ -140,13 +129,37 @@ fn gen_pawn_moves(pos: &Position, from: Square, us: Color, out: &mut impl MoveSi
             let to = make_square(nr, f);
             if pos.board[to as usize].is_empty() {
                 let info = PushPlan::single(from, to, None);
-                add_move(out, pos, &info, from, to, 0, 0, SpecialMove::None, us);
+                add_move(
+                    out,
+                    pos,
+                    &info,
+                    Move {
+                        from,
+                        to,
+                        path_kind: 0,
+                        stop_index: 0,
+                        ..Move::default()
+                    },
+                    us,
+                );
             } else if pos.board[to as usize].is_color(us) {
                 // Push friendly piece forward
                 if let Some(info) =
                     resolve_push(pos, from, to, dr, 0).filter(|p| p.captured().is_none())
                 {
-                    add_move(out, pos, &info, from, to, 0, 0, SpecialMove::None, us);
+                    add_move(
+                        out,
+                        pos,
+                        &info,
+                        Move {
+                            from,
+                            to,
+                            path_kind: 0,
+                            stop_index: 0,
+                            ..Move::default()
+                        },
+                        us,
+                    );
                 }
             }
             // Pawn can't capture forward
@@ -161,7 +174,19 @@ fn gen_pawn_moves(pos: &Position, from: Square, us: Color, out: &mut impl MoveSi
             if let Some(info) =
                 resolve_push(pos, from, to, dr, 0).filter(|p| p.captured().is_none())
             {
-                add_move(out, pos, &info, from, to, 0, 1, SpecialMove::None, us);
+                add_move(
+                    out,
+                    pos,
+                    &info,
+                    Move {
+                        from,
+                        to,
+                        path_kind: 0,
+                        stop_index: 1,
+                        ..Move::default()
+                    },
+                    us,
+                );
             }
             // Pawn can't capture with double push
         }
@@ -179,7 +204,19 @@ fn gen_pawn_moves(pos: &Position, from: Square, us: Color, out: &mut impl MoveSi
         if !pos.board[to as usize].is_empty() && !pos.board[to as usize].is_color(us) {
             // Capture
             let info = PushPlan::single(from, to, Some(to));
-            add_move(out, pos, &info, from, to, 0, 0, SpecialMove::None, us);
+            add_move(
+                out,
+                pos,
+                &info,
+                Move {
+                    from,
+                    to,
+                    path_kind: 0,
+                    stop_index: 0,
+                    ..Move::default()
+                },
+                us,
+            );
         }
     }
 
@@ -217,12 +254,36 @@ fn gen_knight_moves(pos: &Position, from: Square, us: Color, out: &mut impl Move
         // Equal plans have the same displacements and capture, regardless of path.
         let info1 = resolve_knight_push(pos, from, to, true);
         if let Some(info) = &info1 {
-            add_move(out, pos, info, from, to, 1, 0, SpecialMove::None, us);
+            add_move(
+                out,
+                pos,
+                info,
+                Move {
+                    from,
+                    to,
+                    path_kind: 1,
+                    stop_index: 0,
+                    ..Move::default()
+                },
+                us,
+            );
         }
         if let Some(info) = resolve_knight_push(pos, from, to, false)
             && info1.as_ref() != Some(&info)
         {
-            add_move(out, pos, &info, from, to, 2, 0, SpecialMove::None, us);
+            add_move(
+                out,
+                pos,
+                &info,
+                Move {
+                    from,
+                    to,
+                    path_kind: 2,
+                    stop_index: 0,
+                    ..Move::default()
+                },
+                us,
+            );
         }
     }
 }
@@ -269,7 +330,19 @@ fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut impl MoveSi
         } else {
             // Friendly piece — king pushes it along the movement direction
             if let Some(info) = resolve_push(pos, from, to, RAY_DR[dir], RAY_DC[dir]) {
-                add_move(out, pos, &info, from, to, 0, 0, SpecialMove::None, us);
+                add_move(
+                    out,
+                    pos,
+                    &info,
+                    Move {
+                        from,
+                        to,
+                        path_kind: 0,
+                        stop_index: 0,
+                        ..Move::default()
+                    },
+                    us,
+                );
             }
         }
     }

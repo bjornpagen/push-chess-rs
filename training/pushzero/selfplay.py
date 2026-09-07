@@ -1,10 +1,7 @@
 """Batched self-play, exact terminal rewards, and optional rules-only curriculum."""
 from dataclasses import dataclass, field
-import json
-import os
-from pathlib import Path
+from copy import deepcopy
 import time
-import uuid
 import numpy as np
 from ._native import State, RULES_VERSION, ENCODING_VERSION
 from .replay import Sample, CompactSample, ObservationCache, GameLog, game_reference, validate_targets
@@ -195,74 +192,67 @@ class RollingCollector:
         finally:
             self.active = False
 
-    def save(self, directory):
-        if self.active: raise RuntimeError("checkpoint requires a move boundary")
-        directory = Path(directory)
-        path = directory / f"actors-{uuid.uuid4().hex}.npz"
-        games = [{"fen": g.initial, "moves": g.moves, "start_ply": g.start_ply,
-                  "source": g.source, "curriculum": g.curriculum} for g in self.slots]
+    def snapshot(self):
+        """Owned RAM state; durable game truth belongs in bumbledb."""
+        if self.active: raise RuntimeError("snapshot requires a move boundary")
         targets = [(i, t) for i, g in enumerate(self.slots) for t in g.examples]
-        offsets = np.cumsum([0] + [len(t.ids) for _, t in targets], dtype=np.int64)
-        temporary = path.with_suffix(".partial")
-        with temporary.open("wb") as stream:
-            np.savez_compressed(stream, metadata=np.asarray(json.dumps({"format": 1, "rules": RULES_VERSION,
-                "encoding": ENCODING_VERSION, "stats": self.statistics(), "started": self.started})),
-                games=np.asarray(json.dumps(games)), offsets=offsets,
-                ids=np.concatenate([t.ids for _,t in targets]) if targets else np.empty(0, np.uint32),
-                policies=np.concatenate([t.policy for _,t in targets]) if targets else np.empty(0, np.float32),
-                refs=np.asarray([(i,t.ply,t.turn) for i,t in targets], np.int64).reshape(-1, 3),
-                predictions=np.asarray([t.predicted for _,t in targets], np.float32),
-                provenance=np.asarray(json.dumps([t.provenance for _,t in targets])))
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        return path
+        return {
+            "metadata": {"format": 1, "rules": RULES_VERSION, "encoding": ENCODING_VERSION,
+                         "stats": self.statistics(), "started": self.started},
+            "games": [{"fen": g.initial, "moves": list(g.moves), "start_ply": g.start_ply,
+                       "source": g.source, "curriculum": g.curriculum} for g in self.slots],
+            "offsets": np.cumsum([0] + [len(t.ids) for _, t in targets], dtype=np.int64),
+            "ids": np.concatenate([t.ids for _, t in targets]) if targets else np.empty(0, np.uint32),
+            "policies": np.concatenate([t.policy for _, t in targets]) if targets else np.empty(0, np.float32),
+            "refs": np.asarray([(i, t.ply, t.turn) for i, t in targets], np.int64).reshape(-1, 3),
+            "predictions": np.asarray([t.predicted for _, t in targets], np.float32),
+            "provenance": deepcopy([t.provenance for _, t in targets]),
+        }
 
     @staticmethod
-    def restore(path):
-        with np.load(path, allow_pickle=False) as d:
-            metadata = json.loads(str(d["metadata"]))
-            if (metadata.get("format"), metadata.get("rules"), metadata.get("encoding")) != (1, RULES_VERSION, ENCODING_VERSION):
-                raise ValueError("incompatible actor checkpoint")
-            slots = []
-            for g in json.loads(str(d["games"])):
-                state = State(g["fen"])
-                for move in g["moves"]: state.play(move)
-                if state.outcome() is not None or not 0 <= g["start_ply"] <= len(g["moves"]):
-                    raise ValueError("invalid unfinished game")
-                game = Trajectory(state, g["curriculum"], g["fen"], list(g["moves"]), g["source"])
-                game.start_ply = g["start_ply"]
-                slots.append(game)
-            refs, offsets = d["refs"], d["offsets"]
-            provenance = json.loads(str(d["provenance"]))
-            if (refs.ndim != 2 or refs.shape[1] != 3 or refs.dtype.kind not in "iu"
-                or offsets.shape != (len(refs) + 1,) or offsets.dtype.kind not in "iu" or offsets[0] != 0
-                or (np.diff(offsets) < 1).any() or offsets[-1] != len(d["ids"])
-                or d["ids"].ndim != 1 or d["policies"].shape != d["ids"].shape
-                or d["predictions"].shape != (len(refs),) or len(provenance) != len(refs)):
-                raise ValueError("invalid actor target layout")
-            for i, (slot, ply, turn) in enumerate(refs):
-                if not 0 <= slot < len(slots) or not slots[slot].start_ply <= ply < len(slots[slot].moves) or turn not in (0, 1):
-                    raise ValueError("invalid actor target reference")
-                a, b = offsets[i:i + 2]
-                ids, policy, predicted = d["ids"][a:b].copy(), d["policies"][a:b].copy(), float(d["predictions"][i])
-                validate_targets(ids, policy, np.zeros(3, np.float32), 0)
-                if not np.isfinite(predicted) or abs(predicted) > 1.00001 or not isinstance(provenance[i], dict):
-                    raise ValueError("invalid pending prediction/provenance")
-                targets = slots[slot].examples
-                if targets and ply <= targets[-1].ply: raise ValueError("actor targets must have increasing plies")
-                targets.append(PendingTarget(int(ply), ids, policy, int(turn), predicted, provenance[i]))
-            # Reconstruct each history once, proving identity and perspective at
-            # every referenced position before accepting any resumed targets.
-            for game in slots:
-                state, targets = State(game.initial), {t.ply: t for t in game.examples}
-                for ply, move in enumerate(game.moves):
-                    if ply in targets:
-                        target = targets[ply]
-                        if state.legal_ids() != target.ids.tolist() or state.turn() != target.turn:
-                            raise ValueError("actor target identity changed")
-                    state.play(move)
-            return slots, metadata
+    def restore(d):
+        metadata = deepcopy(d["metadata"])
+        if (metadata.get("format"), metadata.get("rules"), metadata.get("encoding")) != (1, RULES_VERSION, ENCODING_VERSION):
+            raise ValueError("incompatible actor checkpoint")
+        slots = []
+        for g in d["games"]:
+            state = State(g["fen"])
+            for move in g["moves"]: state.play(move)
+            if state.outcome() is not None or not 0 <= g["start_ply"] <= len(g["moves"]):
+                raise ValueError("invalid unfinished game")
+            game = Trajectory(state, g["curriculum"], g["fen"], list(g["moves"]), g["source"])
+            game.start_ply = g["start_ply"]
+            slots.append(game)
+        refs, offsets = d["refs"], d["offsets"]
+        provenance = deepcopy(d["provenance"])
+        if (refs.ndim != 2 or refs.shape[1] != 3 or refs.dtype.kind not in "iu"
+            or offsets.shape != (len(refs) + 1,) or offsets.dtype.kind not in "iu" or offsets[0] != 0
+            or (np.diff(offsets) < 1).any() or offsets[-1] != len(d["ids"])
+            or d["ids"].ndim != 1 or d["policies"].shape != d["ids"].shape
+            or d["predictions"].shape != (len(refs),) or len(provenance) != len(refs)):
+            raise ValueError("invalid actor target layout")
+        for i, (slot, ply, turn) in enumerate(refs):
+            if not 0 <= slot < len(slots) or not slots[slot].start_ply <= ply < len(slots[slot].moves) or turn not in (0, 1):
+                raise ValueError("invalid actor target reference")
+            a, b = offsets[i:i + 2]
+            ids, policy, predicted = d["ids"][a:b].copy(), d["policies"][a:b].copy(), float(d["predictions"][i])
+            validate_targets(ids, policy, np.zeros(3, np.float32), 0)
+            if not np.isfinite(predicted) or abs(predicted) > 1.00001 or not isinstance(provenance[i], dict):
+                raise ValueError("invalid pending prediction/provenance")
+            targets = slots[slot].examples
+            if targets and ply <= targets[-1].ply: raise ValueError("actor targets must have increasing plies")
+            targets.append(PendingTarget(int(ply), ids, policy, int(turn), predicted, provenance[i]))
+        # Reconstruct each history once, proving identity and perspective at
+        # every referenced position before accepting any resumed targets.
+        for game in slots:
+            state, targets = State(game.initial), {t.ply: t for t in game.examples}
+            for ply, move in enumerate(game.moves):
+                if ply in targets:
+                    target = targets[ply]
+                    if state.legal_ids() != target.ids.tolist() or state.turn() != target.turn:
+                        raise ValueError("actor target identity changed")
+                state.play(move)
+        return slots, metadata
 
 
 def collect(predictor, rng, games=64, actors=32, simulations=64, fast_simulations=16,

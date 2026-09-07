@@ -1,6 +1,5 @@
 """Metal-first command line. DEV must be selected before importing tinygrad."""
 import argparse
-from dataclasses import fields
 import importlib.metadata
 import json
 import os
@@ -17,8 +16,7 @@ def main(argv=None):
         from .experiments import main as write_plan
         return write_plan(argv[1:])
     from tinygrad import Device
-    from .run import TrainConfig, train
-    parser = argparse.ArgumentParser(description="Rules-only Push Chess self-play on tinygrad/Metal")
+    parser = argparse.ArgumentParser(description="Push Chess bumbledb learning and tinygrad/Metal experiments")
     parser.add_argument("--allow-cpu", action="store_true", help="allow explicit DEV=CPU for diagnostics")
     sub = parser.add_subparsers(dest="command", required=True)
     doctor = sub.add_parser("doctor", help="check Metal, checkpointing, and search/inference throughput")
@@ -42,31 +40,14 @@ def main(argv=None):
     throughput.add_argument("--warmup", type=float, default=10.)
     throughput.add_argument("--output", type=Path, required=True)
     sub.add_parser("plan", help="write an experiment manifest without compute (use plan --output PATH)")
-    training = sub.add_parser("train", help="start or resume a bounded self-play run")
-    training.add_argument("--run", type=Path, required=True)
-    training.add_argument("--minutes", type=float, default=60)
-    training.add_argument("--iterations", type=int, default=10000)
-    training.add_argument("--resume", action="store_true", help="restore the saved config, optimizer, RNG and replay")
+    training = sub.add_parser("pretrain", help="bounded teacher training from bumbledb only")
+    training.add_argument("--db", type=Path, required=True)
+    training.add_argument("--output", type=Path, required=True)
+    training.add_argument("--resume", type=Path)
     training.add_argument("--no-jit", action="store_true")
-    defaults = TrainConfig()
-    for f in fields(defaults):
-        value = getattr(defaults, f.name)
-        options = {"action": argparse.BooleanOptionalAction} if isinstance(value, bool) else {"type": type(value)}
-        training.add_argument("--" + f.name.replace("_", "-"), default=value, **options)
-    evaluation = sub.add_parser("evaluate", help="paired held-out match, never used as training data")
-    evaluation.add_argument("checkpoint", type=Path, help="checkpoint file, run directory, or latest/initial.json")
-    evaluation.add_argument("--opponent", default="cataclysm", help="engine name, random, or another checkpoint/run")
-    evaluation.add_argument("--pairs", type=int, default=8)
-    evaluation.add_argument("--simulations", type=int, default=64)
-    evaluation.add_argument("--opponent-ms", type=int, default=50)
-    evaluation.add_argument("--opponent-nodes", type=int, default=0)
-    evaluation.add_argument("--max-plies", type=int, default=512)
-    evaluation.add_argument("--opening-plies", type=int, default=6)
-    evaluation.add_argument("--seed", type=int, default=918273)
-    evaluation.add_argument("--output", type=Path, required=True)
-    evaluation.add_argument("--move-ms", type=float, help="same requested wall time per move for both contestants")
-    evaluation.add_argument("--weights", choices=("raw", "ema"), default="raw")
-    evaluation.add_argument("--opponent-weights", choices=("raw", "ema"), default="raw")
+    for name, default in (("steps",1000),("batch-size",128),("capacity",100000),("max-games",10000),
+                          ("channels",64),("blocks",4),("seed",1)):
+        training.add_argument("--"+name, type=int, default=default)
     analysis = sub.add_parser("analyse", help="choose a legal move with a saved model")
     analysis.add_argument("checkpoint", type=Path, help="checkpoint file or run directory")
     analysis.add_argument("--fen")
@@ -74,12 +55,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if Device.DEFAULT != "METAL" and not (args.allow_cpu and Device.DEFAULT == "CPU"):
         parser.error(f"expected METAL, got {Device.DEFAULT}; CPU diagnostics require DEV=CPU and --allow-cpu")
-    if args.command == "train":
-        config = defaults if args.resume else TrainConfig(**{f.name: getattr(args, f.name) for f in fields(defaults)})
-        overrides = {f.name: getattr(args, f.name) for f in fields(defaults)
-                     if any(a.split("=")[0] in ("--" + f.name.replace("_", "-"), "--no-" + f.name.replace("_", "-"))
-                            for a in argv)} if args.resume else None
-        train(args.run, config, args.minutes, args.iterations, args.resume, not args.no_jit, system_overrides=overrides)
+    if args.command == "pretrain":
+        from .pretrain import train
+        print(json.dumps(train(args.db,args.output,steps=args.steps,batch_size=args.batch_size,
+            capacity=args.capacity,max_games=args.max_games,channels=args.channels,blocks=args.blocks,
+            seed=args.seed,resume=args.resume,jit=not args.no_jit),indent=2))
     elif args.command == "throughput":
         from .throughput import sweep
         from .learning import write_json
@@ -99,17 +79,6 @@ def main(argv=None):
                        args.actors, args.repeats, args.workers, args.cache_mb, args.search_simulations)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         write_json(args.output, result)
-    elif args.command == "evaluate":
-        from .evaluation import evaluate
-        from .learning import write_json
-        if args.output.exists(): raise FileExistsError(args.output)
-        result = evaluate(args.checkpoint, args.opponent, args.pairs, args.simulations, args.opponent_ms,
-                          args.opponent_nodes, args.max_plies, args.seed, args.opening_plies,
-                          progress=lambda row: print(json.dumps(row), flush=True), move_ms=args.move_ms,
-                          weights=args.weights, opponent_weights=args.opponent_weights)
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        write_json(args.output, result)
-        print(json.dumps({k:v for k,v in result.items() if k != "games"}, indent=2))
     elif args.command == "analyse":
         import numpy as np
         from ._native import State

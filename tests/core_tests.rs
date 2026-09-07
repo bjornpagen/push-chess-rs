@@ -152,8 +152,8 @@ fn test_make_unmake() {
     assert!(!moves.is_empty());
 
     let limit = moves.len().min(10);
-    for i in 0..limit {
-        pos.make_move(&moves[i]);
+    for mv in moves.iter().take(limit) {
+        pos.make_move(mv);
         pos.unmake_move();
         assert_eq!(pos.to_fen(), orig_fen);
         assert_eq!(pos.zobrist, orig_z);

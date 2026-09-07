@@ -94,8 +94,8 @@ def test_quota_preserves_all_slots_and_unfinished_targets(tmp_path):
         assert len(c.slots) == 8 and all(g.moves for g in c.slots)
         assert c.statistics()["pending_targets"] >= 8
         original = [(g.initial, list(g.moves), list(g.examples)) for g in c.slots]
-        path = c.save(tmp_path)
-        restored, meta = RollingCollector.restore(path)
+        snapshot = c.snapshot()
+        restored, meta = RollingCollector.restore(snapshot)
         assert meta["stats"] == c.statistics()
         resumed = collector(p, restored)
         for (fen, moves, targets), g in zip(original, resumed.slots):
@@ -137,7 +137,7 @@ def test_no_population_draws_rng_before_pending_learning_or_after_stop(tmp_path)
         rng = np.random.default_rng(9)
         before = json.dumps(rng.bit_generator.state)
         c = RollingCollector(p, rng)
-        c.save(tmp_path)
+        c.snapshot()
         assert c.collect(1, stop=lambda: True) == ([], [])
         assert json.dumps(rng.bit_generator.state) == before
         assert c.slots == []
@@ -150,14 +150,12 @@ def test_actor_snapshot_rejects_corrupt_targets(tmp_path):
     try:
         c = collector(p)
         c.collect(10000, move_limit=8)
-        path = c.save(tmp_path)
-        with np.load(path, allow_pickle=False) as d: data = dict(d)
+        snapshot = c.snapshot()
+        data = dict(snapshot)
         data["ids"] = data["ids"].copy()
         data["ids"][0] = 2**32 - 1
-        bad = tmp_path / "bad.npz"
-        np.savez_compressed(bad, **data)
-        with pytest.raises(ValueError, match="identity"): RollingCollector.restore(bad)
-        restored, _ = RollingCollector.restore(path)
+        with pytest.raises(ValueError, match="identity"): RollingCollector.restore(data)
+        restored, _ = RollingCollector.restore(snapshot)
         with pytest.raises(ValueError, match="population"):
             RollingCollector(p, np.random.default_rng(0), actors=9, restored=restored)
     finally:

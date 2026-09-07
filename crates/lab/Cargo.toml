@@ -1,0 +1,20 @@
+[package]
+name = "push-chess-lab"
+version = "0.1.0"
+edition = "2024"
+default-run = "lab"
+publish = false
+
+[dependencies]
+push-chess = { path = "../.." }
+bumbledb = { git = "https://github.com/bjornpagen/bumbledb", rev = "3ed3303eb226de6c98955ab75c296887eaf7704b" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ctrlc = { version = "3.4", features = ["termination"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

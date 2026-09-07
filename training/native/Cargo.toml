@@ -9,7 +9,8 @@ name = "_native"
 crate-type = ["cdylib"]
 
 [dependencies]
-push-chess = { path = "../..", features = ["historical-engines"] }
+push-chess = { path = "../.." }
+push-chess-lab = { path = "../../crates/lab" }
 pyo3 = { version = "0.26", features = ["extension-module", "abi3-py311"] }
 numpy = "0.26"
 

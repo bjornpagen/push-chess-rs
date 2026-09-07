@@ -7,7 +7,7 @@ from pushzero._native import State, SearchBatch, SearchRuntime, RULES_VERSION, E
 from pushzero.model import ModelConfig, Network, Predictor
 from pushzero.protocol import pack_observations
 from pushzero.learning import Learner, save_checkpoint, load_checkpoint
-from pushzero.replay import Sample, Replay, GameLog, save_shard, load_shard
+from pushzero.replay import Sample, Replay, GameLog
 from pushzero.curriculum import RestartArchive
 from pushzero.evaluation import paired_summary
 from pushzero.selfplay import Trajectory
@@ -101,7 +101,7 @@ def test_pool_closes_with_unanswered_batch_and_is_idempotent():
     with pytest.raises(ValueError): runtime.start(0, [state], np.zeros((1, 128), np.float32), 8, 4)
 
 
-def test_compact_shards_share_game_logs_and_reconstruct_actual_history(tmp_path):
+def test_compact_replay_shares_game_logs_and_reconstructs_actual_history():
     state = State("7k/8/8/8/8/8/8/K7 w - - 0 1")
     initial, moves, samples = state.fen(), [], []
     for from_sq, to_sq in [(0, 1), (63, 62), (1, 0), (62, 63), (0, 1)]:
@@ -114,12 +114,10 @@ def test_compact_shards_share_game_logs_and_reconstruct_actual_history(tmp_path)
         moves.append(move)
     game = GameLog(initial, tuple(moves))
     for s in samples: s.game = game
-    path = save_shard(tmp_path, samples, {"model_version": "test"})
-    with np.load(path, allow_pickle=False) as d:
-        assert "boards" not in d and "actions" not in d
-        assert len(json.loads(str(d["games"]))) == 1
-    restored, info = load_shard(path)
-    assert info["format"] == 2 and info["model_version"] == "test"
+    full = Replay()
+    full.extend(samples)
+    restored = full.samples
+    assert all(s.game is game for s in restored)
     for a, b in zip(samples, restored):
         np.testing.assert_array_equal(a.board, b.board)
         np.testing.assert_array_equal(a.actions, b.actions)
@@ -130,18 +128,6 @@ def test_compact_shards_share_game_logs_and_reconstruct_actual_history(tmp_path)
     batch = replay.batch(np.random.default_rng(0), 4, effects=True)
     assert len(batch) == 7 and len(replay.samples) == 3
     assert replay.cache.bytes <= replay.cache.capacity
-
-
-def test_legacy_shard_reader_is_retained(tmp_path):
-    s = example()
-    path = tmp_path / "legacy.npz"
-    np.savez_compressed(path, boards=s.board[None].astype(np.float16), ids=s.ids[None], actions=s.actions[None],
-        policies=s.policy[None], lengths=np.array([len(s.ids)]), wdl=s.wdl[None], weights=np.array([1.]),
-        histories=np.asarray(json.dumps([{"fen": s.initial_fen, "moves": []}])),
-        metadata=np.asarray(json.dumps({"format": 1, "rules": RULES_VERSION, "encoding": ENCODING_VERSION})))
-    loaded, info = load_shard(path)
-    assert info["format"] == 1
-    np.testing.assert_array_equal(loaded[0].ids, s.ids)
 
 
 def test_effect_learning_and_ema_checkpoint_are_separate(tmp_path):

@@ -1,0 +1,792 @@
+//! Sole durable source of games and observations. One game is one atomic
+//! bumbledb change set; reads copy at most a page of complete trajectories.
+use super::schema::*;
+use super::{Result, RunConfig, Trajectory, relational};
+use bumbledb::{
+    Admission, ApplyExpected, ApplyOutcome, ChangeSet, ChangeSetBuilder, CloseReport, Db,
+    ExecutionPolicy, Fact, WorkContext,
+};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::io::Read;
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+fn work() -> Result<WorkContext> {
+    Ok(bumbledb::start_operation(ExecutionPolicy {
+        input_bytes: 32 << 20,
+        working_bytes: 256 << 20,
+        scratch_bytes: 128 << 20,
+        result_bytes: 64 << 20,
+        rows: 2_000_000,
+        work_units: 200_000_000,
+        timeout: Duration::from_secs(60),
+    })?)
+}
+pub(super) fn insert<'a, F: Fact<'a>>(draft: &mut ChangeSetBuilder<'_>, fact: &F) -> Result<()> {
+    let mut values = Vec::new();
+    fact.append_values(&mut values)?;
+    draft.insert(F::RELATION, &values)?;
+    Ok(())
+}
+pub fn digest_file(path: &Path) -> Result<[u8; 32]> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let len = file.read(&mut buffer)?;
+        if len == 0 {
+            break;
+        }
+        hash.update(&buffer[..len]);
+    }
+    Ok(hash.finalize().into())
+}
+pub(super) fn unhex(s: &str) -> Result<[u8; 32]> {
+    if s.len() != 64 || !s.is_ascii() {
+        return Err("invalid SHA256 digest".into());
+    }
+    let mut bytes = [0; 32];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)?;
+    }
+    Ok(bytes)
+}
+pub(super) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+fn now() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_micros()
+        .try_into()?)
+}
+pub(super) fn split_id(s: &str) -> Result<SplitId> {
+    Ok(match s {
+        "train" => Split::Train.id(),
+        "validation" => Split::Validation.id(),
+        "test" => Split::Test.id(),
+        "evaluation" => Split::Evaluation.id(),
+        _ => return Err("unknown split".into()),
+    })
+}
+pub(super) fn ending_id(s: &str) -> Result<EndingId> {
+    Ok(match s {
+        "checkmate" => Ending::Mate.id(),
+        "stalemate" => Ending::Stalemate.id(),
+        "50_move_rule" => Ending::FiftyMove.id(),
+        "threefold_repetition" => Ending::Repetition.id(),
+        "ply_limit" => Ending::PlyLimit.id(),
+        "interrupted" => Ending::Interrupted.id(),
+        _ => return Err("unknown ending".into()),
+    })
+}
+pub(super) fn ending_name(id: EndingId) -> Result<&'static str> {
+    for s in [
+        "checkmate",
+        "stalemate",
+        "50_move_rule",
+        "threefold_repetition",
+        "ply_limit",
+        "interrupted",
+    ] {
+        if ending_id(s)? == id {
+            return Ok(s);
+        }
+    }
+    Err("invalid stored ending".into())
+}
+pub(super) fn white_value(id: WhiteOutcomeId) -> Result<i32> {
+    if id == WhiteOutcome::Win.id() {
+        Ok(1)
+    } else if id == WhiteOutcome::Draw.id() {
+        Ok(0)
+    } else if id == WhiteOutcome::Loss.id() {
+        Ok(-1)
+    } else {
+        Err("invalid stored outcome".into())
+    }
+}
+fn status_name(id: RunStatusId) -> &'static str {
+    if id == RunStatus::Finished.id() {
+        "finished"
+    } else if id == RunStatus::Interrupted.id() {
+        "interrupted"
+    } else {
+        "failed"
+    }
+}
+
+pub struct CorpusGame {
+    pub run_id: u64,
+    pub trajectory: Trajectory,
+    pub trajectory_key: [u8; 32],
+    pub binary: [u8; 32],
+    pub rules: String,
+}
+pub struct CorpusPage {
+    pub games: Vec<CorpusGame>,
+    pub cursor: (u64, u64),
+    pub done: bool,
+}
+pub struct Corpus {
+    db: Db<TrainingGround>,
+}
+impl Corpus {
+    pub fn create(path: &Path) -> Result<Self> {
+        match Db::create(path, TrainingGround, work()?)? {
+            Admission::Accepted(db) => Ok(Self { db }),
+            Admission::Rejected(v) => Err(format!("empty schema rejected: {v:?}").into()),
+        }
+    }
+    /// Requires an existing directory with exactly this schema; no conversion.
+    pub fn open(path: &Path) -> Result<Self> {
+        Ok(Self {
+            db: Db::open(path, TrainingGround, work()?)?,
+        })
+    }
+    pub fn close(&self) -> Result<()> {
+        match self.db.close(&work()?) {
+            CloseReport::Closed => Ok(()),
+            report => Err(format!("database close incomplete: {report:?}").into()),
+        }
+    }
+    pub fn disk_bytes(&self) -> Result<u64> {
+        Ok(self.db.disk_size(work()?)?)
+    }
+    fn apply(&self, draft: ChangeSetBuilder<'_>, work: &WorkContext) -> Result<()> {
+        match self.db.apply(&draft.finish()?, ApplyExpected::Any, work)? {
+            ApplyOutcome::Accepted { .. } => Ok(()),
+            ApplyOutcome::NoChange { .. } => Err("duplicate corpus write refused".into()),
+            ApplyOutcome::InvariantRejected { violations } => {
+                Err(format!("corpus invariant rejected: {violations:?}").into())
+            }
+            ApplyOutcome::Moved { .. } => Err("corpus changed under write".into()),
+        }
+    }
+    pub(super) fn start(&self, config: &RunConfig) -> Result<u64> {
+        config.validate()?;
+        let w = work()?;
+        let id = {
+            let snapshot = self.db.snapshot(&w)?;
+            snapshot
+                .frame(&w)
+                .count(Run::RELATION)?
+                .checked_add(1)
+                .ok_or("run id exhausted")?
+        };
+        let mut draft = ChangeSet::builder(self.db.schema(), w.clone());
+        relational::write_config(
+            &mut draft,
+            RunId(id),
+            config,
+            digest_file(&std::env::current_exe()?)?,
+            now()?,
+        )?;
+        self.apply(draft, &w)?;
+        Ok(id)
+    }
+    pub(super) fn finish(&self, run: u64, status: &str, error: Option<&str>) -> Result<()> {
+        let status = match status {
+            "finished" => RunStatus::Finished.id(),
+            "interrupted" => RunStatus::Interrupted.id(),
+            "failed" if error.is_some() => RunStatus::Failed.id(),
+            _ => return Err("invalid run finalization".into()),
+        };
+        let w = work()?;
+        let mut draft = ChangeSet::builder(self.db.schema(), w.clone());
+        insert(
+            &mut draft,
+            &RunEnd {
+                run: RunId(run),
+                status,
+                finished_us: now()?,
+            },
+        )?;
+        if let Some(message) = error {
+            insert(
+                &mut draft,
+                &RunFailure {
+                    run: RunId(run),
+                    message,
+                },
+            )?;
+        }
+        self.apply(draft, &w)
+    }
+    pub(super) fn save(&mut self, run: u64, game: &Trajectory) -> Result<()> {
+        game.validate()?;
+        let run = RunId(run);
+        let w = work()?;
+        let config = {
+            let snapshot = self.db.snapshot(&w)?;
+            let frame = snapshot.frame(&w);
+            if frame.get(RunEndByRun { run })?.is_some() {
+                return Err("run is sealed".into());
+            }
+            if frame
+                .get(GameByRunIndex {
+                    run,
+                    index: game.index as u64,
+                })?
+                .is_some()
+            {
+                return Err("game already committed".into());
+            }
+            let meta = frame.get(RunById { id: run })?.ok_or("missing run")?;
+            relational::config(&frame, &meta)?
+        };
+        let mut draft = ChangeSet::builder(self.db.schema(), w.clone());
+        relational::write_game(&mut draft, run, game, &config)?;
+        self.apply(draft, &w)
+    }
+    pub fn summary(&self) -> Result<Value> {
+        let w = work()?;
+        let snapshot = self.db.snapshot(&w)?;
+        let frame = snapshot.frame(&w);
+        let mut runs = Vec::new();
+        for run in frame.scan_facts::<Run>()? {
+            let run = run?;
+            let status = frame.get(RunEndByRun { run: run.id })?;
+            let error = frame.get(RunFailureByRun { run: run.id })?;
+            runs.push(json!({"id":run.id.0,"status":status.map(|s|status_name(s.status)).unwrap_or("running"),
+                "config":relational::config(&frame,&run)?,"binary_sha256":hex(&run.binary),
+                "error":error.map(|e|e.message)}));
+        }
+        runs.sort_by_key(|r| r["id"].as_u64());
+        Ok(
+            json!({"backend":"bumbledb","disk_bytes":self.disk_bytes()?, "totals":{
+            "games":frame.count(Game::RELATION)?,"moves":frame.count(Move::RELATION)?,"positions":frame.count(Position::RELATION)?,
+            "analyses":frame.count(Analysis::RELATION)?,"terminal_games":frame.count(GameResult::RELATION)?},
+            "runs":runs}),
+        )
+    }
+    /// Descriptive score bounds, not Elo or an automatic promotion gate.
+    pub fn report(&self, run: u64) -> Result<Value> {
+        let w = work()?;
+        let snapshot = self.db.snapshot(&w)?;
+        let frame = snapshot.frame(&w);
+        let meta = frame
+            .get(RunById { id: RunId(run) })?
+            .ok_or("unknown run")?;
+        let config: RunConfig = relational::config(&frame, &meta)?;
+        let mut results = std::collections::BTreeMap::<(String, String), [u64; 5]>::new();
+        for (a, b) in config.matchups() {
+            results.insert(
+                (config.engines[a].clone(), config.engines[b].clone()),
+                [0; 5],
+            );
+        }
+        for row in frame.scan_facts::<Game>()? {
+            let game = row?;
+            if game.run.0 != run {
+                continue;
+            }
+            let (a, b) = config.matchup(game.index as usize / 2);
+            let tally = results
+                .get_mut(&(config.engines[a].clone(), config.engines[b].clone()))
+                .ok_or("unplanned matchup")?;
+            tally[3] += 1;
+            tally[4] += game.plies;
+            if let Some(result) = frame.get(GameResultByRunGame {
+                run: game.run,
+                game: game.index,
+            })? {
+                let relative = white_value(result.outcome)? * if !game.swapped { 1 } else { -1 };
+                tally[if relative > 0 {
+                    0
+                } else if relative == 0 {
+                    1
+                } else {
+                    2
+                }] += 1;
+            }
+        }
+        let status = frame.get(RunEndByRun { run: RunId(run) })?;
+        let pairs: Vec<_> = results.into_iter().map(|((a,b),r)| {
+            let known = r[0]+r[1]+r[2]; let scheduled = (config.pairs*2) as f64;
+            let score = r[0] as f64 + r[1] as f64*0.5;
+            json!({"a":a,"b":b,"wins":r[0],"draws":r[1],"losses":r[2],"saved":r[3],"positions":r[4],
+                "unknown_or_missing":config.pairs*2-known as usize,
+                "score_bounds":[score/scheduled,(score+scheduled-known as f64)/scheduled]})
+        }).collect();
+        Ok(
+            json!({"run":run,"status":status.map(|s|status_name(s.status)).unwrap_or("running"),
+            "scheduled_games":config.total_pairs()*2,"matchups":pairs,"promotion_ready":false}),
+        )
+    }
+    /// Offline integrity audit. Includes quarantined and interrupted games;
+    /// reports observations without changing their training eligibility.
+    pub fn verify(&self, run: u64) -> Result<Value> {
+        let config = {
+            let w = work()?;
+            let snapshot = self.db.snapshot(&w)?;
+            let frame = snapshot.frame(&w);
+            let meta = frame
+                .get(RunById { id: RunId(run) })?
+                .ok_or("unknown run")?;
+            relational::config(&frame, &meta)?
+        };
+        let (mut games, mut moves, mut analyses, mut complete, mut terminal) =
+            (0u64, 0u64, 0u64, 0u64, 0u64);
+        let (mut wall_us, mut nodes, mut overruns) = (0u64, 0u64, 0u64);
+        for index in 0..(config.total_pairs() * 2) as u64 {
+            let w = work()?;
+            let snapshot = self.db.snapshot(&w)?;
+            let frame = snapshot.frame(&w);
+            let Some(g) = frame.get(GameByRunIndex {
+                run: RunId(run),
+                index,
+            })?
+            else {
+                continue;
+            };
+            let game = relational::read_game(&frame, &g)?;
+            game.validate()?;
+            games += 1;
+            moves += game.plies.len() as u64;
+            terminal += u64::from(game.white_value.is_some());
+            for p in &game.plies {
+                if p.score.is_some() {
+                    analyses += 1;
+                    complete += u64::from(p.search_complete);
+                    wall_us += p.wall_us as u64;
+                    nodes += p.nodes;
+                    overruns +=
+                        u64::from(config.time_ms > 0 && p.wall_us as u64 > config.time_ms * 1000);
+                }
+            }
+        }
+        Ok(
+            json!({"run":run,"verified_games":games,"moves":moves,"positions":moves+games,
+            "analyses":analyses,"completed_searches":complete,"terminal_games":terminal,
+            "search_wall_us":wall_us,"search_nodes":nodes,"time_overruns":overruns}),
+        )
+    }
+    /// Short-lived snapshots: never pin an hours-long read across map growth.
+    /// Failed/unsealed runs and interrupted games are excluded. Interrupted
+    /// runs retain their already verified complete games.
+    pub fn page(&self, split: &str, after: (u64, u64), limit: usize) -> Result<CorpusPage> {
+        let selected = split_id(split)?;
+        if !(1..=32).contains(&limit) {
+            return Err("page limit must be 1..=32".into());
+        }
+        let w = work()?;
+        let snapshot = self.db.snapshot(&w)?;
+        let frame = snapshot.frame(&w);
+        let mut ids = frame
+            .scan_facts::<Run>()?
+            .map(|r| r.map(|r| r.id.0))
+            .collect::<bumbledb::Result<Vec<_>>>()?;
+        ids.sort_unstable();
+        let mut games = Vec::new();
+        let mut cursor = after;
+        for id in ids.into_iter().filter(|id| *id >= after.0) {
+            let run = frame.get(RunById { id: RunId(id) })?.ok_or("missing run")?;
+            let Some(end) = frame.get(RunEndByRun { run: RunId(id) })? else {
+                continue;
+            };
+            if end.status == RunStatus::Failed.id() {
+                continue;
+            }
+            let config: RunConfig = relational::config(&frame, &run)?;
+            let start = if id == after.0 {
+                after.1.saturating_add(1)
+            } else {
+                0
+            };
+            for index in start..(config.total_pairs() * 2) as u64 {
+                cursor = (id, index);
+                let Some(game) = frame.get(GameByRunIndex {
+                    run: RunId(id),
+                    index,
+                })?
+                else {
+                    continue;
+                };
+                if game.split != selected || game.ending == Ending::Interrupted.id() {
+                    continue;
+                }
+                let trajectory = relational::read_game(&frame, &game)?;
+                trajectory.validate()?;
+                games.push(CorpusGame {
+                    run_id: id,
+                    trajectory,
+                    trajectory_key: game.trajectory,
+                    binary: run.binary,
+                    rules: run.rules.into(),
+                });
+                if games.len() == limit {
+                    return Ok(CorpusPage {
+                        games,
+                        cursor,
+                        done: false,
+                    });
+                }
+            }
+        }
+        Ok(CorpusPage {
+            games,
+            cursor,
+            done: true,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::runner::tests::{config, fixture};
+    use super::*;
+    fn create() -> (tempfile::TempDir, Corpus) {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::create(&dir.path().join("corpus")).unwrap();
+        (dir, corpus)
+    }
+    #[test]
+    fn atomic_roundtrip_preserves_every_observation_and_reopens() {
+        let (dir, mut corpus) = create();
+        let game = fixture();
+        let run = corpus.start(&config()).unwrap();
+        corpus.save(run, &game).unwrap();
+        assert!(corpus.save(run, &game).is_err());
+        assert_eq!(corpus.page(&game.split, (0, 0), 1).unwrap().games.len(), 0);
+        corpus.finish(run, "finished", None).unwrap();
+        assert!(corpus.save(run, &game).is_err());
+        let summary = corpus.summary().unwrap();
+        assert_eq!(
+            summary["totals"],
+            json!({"games":1,"moves":8,"positions":9,"analyses":4,"terminal_games":0})
+        );
+        let page = corpus.page(&game.split, (0, 0), 1).unwrap();
+        assert_eq!(page.games[0].trajectory.plies, game.plies);
+        assert_eq!(page.games[0].trajectory.final_fen, game.final_fen);
+        assert_eq!(corpus.verify(run).unwrap()["verified_games"], 1);
+        let cursor = page.cursor;
+        assert_eq!(corpus.page(&game.split, cursor, 1).unwrap().games.len(), 0);
+        corpus.close().unwrap();
+        drop(corpus);
+        let corpus = Corpus::open(&dir.path().join("corpus")).unwrap();
+        assert_eq!(corpus.summary().unwrap()["totals"], summary["totals"]);
+        corpus.close().unwrap();
+    }
+    #[test]
+    fn bad_trajectories_cannot_partially_commit() {
+        let (_dir, mut corpus) = create();
+        let run = corpus.start(&config()).unwrap();
+        let mut game = fixture();
+        game.white_value = Some(0);
+        assert!(corpus.save(run, &game).is_err());
+        game.white_value = None;
+        game.plies[0].action = u32::MAX;
+        assert!(corpus.save(run, &game).is_err());
+        assert_eq!(corpus.summary().unwrap()["totals"]["games"], 0);
+        assert_eq!(corpus.summary().unwrap()["totals"]["positions"], 0);
+        corpus.close().unwrap();
+    }
+    #[test]
+    fn schema_rejects_mixed_budgets_and_promotion_to_king() {
+        let (_dir, corpus) = create();
+        let run = corpus.start(&config()).unwrap();
+        let w = work().unwrap();
+        let mut draft = ChangeSet::builder(corpus.db.schema(), w.clone());
+        insert(
+            &mut draft,
+            &TimeBudget {
+                run: RunId(run),
+                microseconds: 1000,
+            },
+        )
+        .unwrap();
+        assert!(corpus.apply(draft, &w).is_err());
+        let mut draft = ChangeSet::builder(corpus.db.schema(), w.clone());
+        let action = ActionId(1);
+        insert(
+            &mut draft,
+            &Action {
+                id: action,
+                from: 48,
+                to: 56,
+                route: Route::Direct.id(),
+                stop: 0,
+                kind: MoveKind::Promotion.id(),
+            },
+        )
+        .unwrap();
+        insert(
+            &mut draft,
+            &ActionPromotion {
+                action,
+                piece: PieceKind::King.id(),
+            },
+        )
+        .unwrap();
+        assert!(corpus.apply(draft, &w).is_err());
+        corpus.close().unwrap();
+    }
+    #[test]
+    fn reader_rejects_missing_delta_even_when_moves_are_legal() {
+        let (_dir, mut corpus) = create();
+        let run = corpus.start(&config()).unwrap();
+        corpus.save(run, &fixture()).unwrap();
+        let w = work().unwrap();
+        let mut values = Vec::new();
+        {
+            let snapshot = corpus.db.snapshot(&w).unwrap();
+            let frame = snapshot.frame(&w);
+            let fact = frame
+                .scan_facts::<PieceRemoved>()
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap();
+            fact.append_values(&mut values).unwrap();
+        }
+        let mut draft = ChangeSet::builder(corpus.db.schema(), w.clone());
+        draft.delete(PieceRemoved::RELATION, &values).unwrap();
+        corpus.apply(draft, &w).unwrap();
+        assert!(
+            corpus
+                .verify(run)
+                .unwrap_err()
+                .to_string()
+                .contains("piece removal set")
+        );
+        corpus.close().unwrap();
+    }
+    #[test]
+    fn schema_rejects_orphan_analysis_and_unlabelled_terminal() {
+        let (_dir, corpus) = create();
+        let run = corpus.start(&config()).unwrap();
+        let w = work().unwrap();
+        let mut draft = ChangeSet::builder(corpus.db.schema(), w.clone());
+        insert(
+            &mut draft,
+            &Analysis {
+                run: RunId(run),
+                game: 0,
+                ply: 0,
+                score_stm: 0,
+                complete: true,
+                nodes: 1,
+                depth: 1,
+                seldepth: 1,
+                wall_us: 1,
+                reported_us: 1,
+                qnodes: 0,
+                tt_hits: 0,
+                pv_length: 0,
+            },
+        )
+        .unwrap();
+        assert!(corpus.apply(draft, &w).is_err());
+        let mut game = fixture();
+        game.initial_fen = "7k/6Q1/5K2/8/8/8/8/8 b - - 100 1".into();
+        game.final_fen = game.initial_fen.clone();
+        game.plies.clear();
+        game.termination = "checkmate".into();
+        game.white_value = None; // Deliberately bypass the replay boundary to test the theory.
+        game.opening_key = super::super::opening_key(&game.initial_fen, std::iter::empty());
+        game.split = super::super::split(&game.opening_key).into();
+        let w = work().unwrap();
+        let mut draft = ChangeSet::builder(corpus.db.schema(), w.clone());
+        relational::write_game(&mut draft, RunId(run), &game, &config()).unwrap();
+        assert!(corpus.apply(draft, &w).is_err());
+        assert_eq!(corpus.summary().unwrap()["totals"]["analyses"], 0);
+        corpus.close().unwrap();
+    }
+    #[test]
+    fn failed_runs_are_quarantined_and_interrupted_runs_keep_valid_games() {
+        let (_dir, mut corpus) = create();
+        let run = corpus.start(&config()).unwrap();
+        let game = fixture();
+        corpus.save(run, &game).unwrap();
+        corpus
+            .finish(run, "failed", Some("fixture failure"))
+            .unwrap();
+        assert_eq!(corpus.page(&game.split, (0, 0), 8).unwrap().games.len(), 0);
+        let run = corpus.start(&config()).unwrap();
+        corpus.save(run, &game).unwrap();
+        corpus.finish(run, "interrupted", None).unwrap();
+        assert_eq!(corpus.page(&game.split, (0, 0), 8).unwrap().games.len(), 1);
+        corpus.close().unwrap();
+    }
+    #[test]
+    fn complete_worker_pipeline_and_pre_stopped_shutdown() {
+        let (_dir, mut corpus) = create();
+        let run = super::super::generate(
+            &mut corpus,
+            &config(),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(corpus.report(run).unwrap()["status"], "finished");
+        assert_eq!(corpus.summary().unwrap()["totals"]["games"], 2);
+        let run = super::super::generate(
+            &mut corpus,
+            &config(),
+            &std::sync::atomic::AtomicBool::new(true),
+        )
+        .unwrap();
+        assert_eq!(corpus.report(run).unwrap()["status"], "interrupted");
+        assert_eq!(corpus.summary().unwrap()["totals"]["games"], 2);
+        corpus.close().unwrap();
+    }
+
+    #[test]
+    fn relational_piece_differences_reconstruct_special_moves() {
+        use push_chess::core::{position::Position as Board, types as c};
+        let fixtures = [
+            (
+                "8/7k/4RB2/8/4N3/8/8/K7 w - - 0 1",
+                28,
+                45,
+                1,
+                c::SpecialMove::None,
+            ),
+            (
+                "7k/P7/R7/8/8/8/8/K7 w - - 0 1",
+                40,
+                48,
+                0,
+                c::SpecialMove::Promotion,
+            ),
+            (
+                "7k/P7/R7/8/8/8/8/K7 w - - 0 1",
+                48,
+                56,
+                0,
+                c::SpecialMove::Promotion,
+            ),
+            (
+                "r3k2r/8/8/3pP3/8/8/8/R3K2R w KQkq d6 0 1",
+                4,
+                6,
+                0,
+                c::SpecialMove::Castle,
+            ),
+            (
+                "r3k2r/8/8/3pP3/8/8/8/R3K2R w KQkq d6 0 1",
+                36,
+                43,
+                0,
+                c::SpecialMove::EnPassant,
+            ),
+        ];
+        let (_dir, mut corpus) = create();
+        let mut config = config();
+        config.pairs = fixtures.len();
+        let run = corpus.start(&config).unwrap();
+        for (i, (fen, from, to, path, special)) in fixtures.iter().enumerate() {
+            let mut board = Board::try_from_fen(fen).unwrap();
+            let initial = board.clone();
+            let mut legal = Vec::new();
+            super::super::legal_moves(&mut board, &mut legal);
+            let mv = *legal
+                .iter()
+                .find(|m| {
+                    m.from == *from
+                        && m.to == *to
+                        && m.path_kind == *path
+                        && m.special == *special
+                        && (*special != c::SpecialMove::Promotion
+                            || m.promo_piece == c::PieceType::Queen)
+                })
+                .expect("special fixture exists");
+            let record = super::super::Ply {
+                action: mv.id(),
+                origin: "opening",
+                side: 0,
+                score: None,
+                score_perspective: "stm",
+                search_complete: false,
+                nodes: 0,
+                depth: 0,
+                seldepth: 0,
+                wall_us: 0,
+                reported_us: 0,
+                pv: vec![],
+                diagnostics: c::SearchDiagnostics::default(),
+                pieces: board.board.iter().filter(|p| !p.is_empty()).count() as u32,
+                halfmove_clock: board.halfmove_clock,
+            };
+            board.make_move(&mv);
+            super::super::legal_moves(&mut board, &mut legal);
+            let (ending, value) =
+                super::super::terminal(&push_chess::game::adjudicate(&board, &legal));
+            let key = super::super::opening_key(fen, std::iter::once(mv.id()));
+            let g = Trajectory {
+                index: i * 2,
+                pair: Some(i),
+                white: "cataclysm".into(),
+                black: "kinetic".into(),
+                initial_fen: fen.to_string(),
+                final_fen: board.to_fen(),
+                opening_key: key.clone(),
+                split: super::super::split(&key).into(),
+                termination: ending.into(),
+                white_value: value,
+                plies: vec![record],
+            };
+            corpus.save(run, &g).unwrap();
+            let w = work().unwrap();
+            let snapshot = corpus.db.snapshot(&w).unwrap();
+            let frame = snapshot.frame(&w);
+            let stored = frame
+                .get(GameByRunIndex {
+                    run: RunId(run),
+                    index: (i * 2) as u64,
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(relational::read_game(&frame, &stored).unwrap(), g);
+            let mut squares = std::collections::BTreeMap::new();
+            let kinds = [
+                PieceKind::Pawn.id(),
+                PieceKind::Knight.id(),
+                PieceKind::Bishop.id(),
+                PieceKind::Rook.id(),
+                PieceKind::Queen.id(),
+                PieceKind::King.id(),
+            ];
+            let fields = |p: c::Piece| {
+                (
+                    if p.color == c::Color::White {
+                        Side::White.id()
+                    } else {
+                        Side::Black.id()
+                    },
+                    kinds[p.piece_type as usize - 1],
+                )
+            };
+            for (sq, p) in initial
+                .board
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| !p.is_empty())
+            {
+                squares.insert(sq as u64, fields(*p));
+            }
+            for r in frame.scan_facts::<PieceRemoved>().unwrap() {
+                let r = r.unwrap();
+                if r.game != g.index as u64 {
+                    continue;
+                }
+                assert_eq!(squares.remove(&r.square), Some((r.side, r.kind)));
+            }
+            for r in frame.scan_facts::<PiecePlaced>().unwrap() {
+                let r = r.unwrap();
+                if r.game != g.index as u64 {
+                    continue;
+                }
+                assert!(squares.insert(r.square, (r.side, r.kind)).is_none());
+            }
+            for (sq, p) in board.board.iter().enumerate() {
+                assert_eq!(
+                    squares.get(&(sq as u64)).copied(),
+                    if p.is_empty() { None } else { Some(fields(*p)) }
+                );
+            }
+        }
+        corpus.close().unwrap();
+    }
+}

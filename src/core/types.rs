@@ -1,11 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-#[cfg_attr(feature = "wasm", tsify::declare)]
 pub type Square = u8;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[repr(u8)]
 pub enum Color {
     #[default]
@@ -15,7 +13,6 @@ pub enum Color {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[repr(u8)]
 pub enum PieceType {
     #[default]
@@ -30,7 +27,6 @@ pub enum PieceType {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[repr(u8)]
 pub enum SpecialMove {
     #[default]
@@ -79,7 +75,15 @@ pub struct SearchStats {
     pub eval_cp: i32,
     pub time_used_us: i64,
     pub pv: Vec<Move>,
-    pub diag_json: String,
+    pub diagnostics: SearchDiagnostics,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchDiagnostics {
+    pub qnodes: u64,
+    pub tt_hits: u64,
+    pub proof_nodes: Option<u64>,
+    pub mate_proof_plies: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

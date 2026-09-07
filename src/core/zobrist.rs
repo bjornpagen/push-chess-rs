@@ -24,19 +24,19 @@ impl Zobrist {
             castling_keys: [0; 16],
             ep_keys: [0; 8],
         };
-        for c in 0..2 {
-            for p in 0..7 {
-                for sq in 0..64 {
-                    z.piece_keys[c][p][sq] = splitmix64(&mut state);
+        for color in &mut z.piece_keys {
+            for piece in color {
+                for square in piece {
+                    *square = splitmix64(&mut state);
                 }
             }
         }
         z.side_key = splitmix64(&mut state);
-        for i in 0..16 {
-            z.castling_keys[i] = splitmix64(&mut state);
+        for key in &mut z.castling_keys {
+            *key = splitmix64(&mut state);
         }
-        for i in 0..8 {
-            z.ep_keys[i] = splitmix64(&mut state);
+        for key in &mut z.ep_keys {
+            *key = splitmix64(&mut state);
         }
         z
     }

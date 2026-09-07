@@ -1,15 +1,8 @@
 /target
+/data
+/models
 /experiments
-pushchess.db
-pushchess.db-wal
-pushchess.db-shm
 .DS_Store
-/web/node_modules
-/web/dist
-/web/src/wasm
-/web/test-results
-/web/playwright-report
-/web/tests/native-fixtures.json
 /.venv
 /training/native/target
 /training/pushzero/*.so

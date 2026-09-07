@@ -1,13 +1,9 @@
-"""Versioned, pickle-free replay shards. Truncations never become draw labels."""
+"""Bounded in-memory replay derived from bumbledb; no durable replay files."""
 from dataclasses import dataclass, field
 from collections import OrderedDict
-import json
-import os
-from pathlib import Path
-import uuid
 
 import numpy as np
-from ._native import State, RULES_VERSION, ENCODING_VERSION, EFFECT_ENCODING_VERSION
+from ._native import State
 from .protocol import action_bucket, bucket, observation_parts
 
 
@@ -168,75 +164,3 @@ class Replay:
             for i, o in enumerate(observations): tokens[i, :len(o[3])] = o[3]
             return (*result, tokens)
         return result
-
-
-def save_shard(directory, samples, metadata):
-    if not samples:
-        raise ValueError("cannot save an empty replay shard")
-    for sample in samples:
-        sample.validate()
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"replay-{uuid.uuid4().hex}.npz"
-    games, indices, refs = [], {}, []
-    for s in samples:
-        game, ply = game_reference(s)
-        if game not in indices:
-            indices[game] = len(games)
-            games.append({"fen": game.initial_fen, "moves": game.moves})
-        refs.append((indices[game], ply))
-    lengths = np.asarray([len(s.ids) for s in samples], np.int64)
-    offsets = np.concatenate((np.zeros(1, np.int64), np.cumsum(lengths)))
-    info = {**metadata, "format": 2, "rules": RULES_VERSION, "encoding": ENCODING_VERSION,
-            "effect_encoding": EFFECT_ENCODING_VERSION, "inputs": "exact-history-reconstruction"}
-    temporary = path.with_suffix(".partial")
-    with temporary.open("wb") as stream:
-        np.savez_compressed(stream, ids=np.concatenate([s.ids for s in samples]).astype(np.uint32),
-            policies=np.concatenate([s.policy for s in samples]).astype(np.float32), offsets=offsets,
-            wdl=np.stack([s.wdl for s in samples]), weights=np.asarray([s.value_weight for s in samples], np.float32),
-            refs=np.asarray(refs, np.int64), games=np.asarray(json.dumps(games)), metadata=np.asarray(json.dumps(info)),
-            provenance=np.asarray(json.dumps([s.provenance for s in samples])))
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
-    return path
-
-
-def load_shard(path):
-    with np.load(path, allow_pickle=False) as d:
-        info = json.loads(str(d["metadata"]))
-        if info.get("format") not in (1, 2) or info.get("rules") != RULES_VERSION or info.get("encoding") != ENCODING_VERSION:
-            raise ValueError("incompatible replay rules or format")
-        if info["format"] == 2:
-            if info.get("effect_encoding") != EFFECT_ENCODING_VERSION:
-                raise ValueError("incompatible replay effect encoding")
-            games = [GameLog(g["fen"], tuple(g["moves"])) for g in json.loads(str(d["games"]))]
-            refs, offsets = d["refs"], d["offsets"]
-            if refs.dtype.kind not in "iu" or offsets.dtype.kind not in "iu" or refs.ndim != 2 or refs.shape[1] != 2 or offsets.shape != (len(refs) + 1,) or offsets[0] != 0 or (np.diff(offsets) < 1).any() or offsets[-1] != len(d["ids"]) or d["ids"].ndim != 1 or d["policies"].shape != d["ids"].shape or d["wdl"].shape != (len(refs), 3) or d["weights"].shape != (len(refs),):
-                raise ValueError("invalid compact replay layout")
-            provenance = json.loads(str(d["provenance"])) if "provenance" in d else [{} for _ in refs]
-            if len(provenance) != len(refs) or any(not isinstance(p, dict) for p in provenance):
-                raise ValueError("invalid replay provenance")
-            cache, samples = ObservationCache(), []
-            for i, (g, ply) in enumerate(refs):
-                if not 0 <= g < len(games): raise ValueError("invalid replay game reference")
-                a, b = offsets[i:i+2]
-                sample = CompactSample(games[g], int(ply), d["ids"][a:b].copy(), d["policies"][a:b].copy(),
-                                       d["wdl"][i].copy(), float(d["weights"][i]), cache, provenance[i])
-                sample.validate()
-                samples.append(sample)
-            return samples, info
-        histories = json.loads(str(d["histories"]))
-        samples = []
-        for i, n in enumerate(d["lengths"]):
-            if n > d["ids"].shape[1]:
-                raise ValueError("replay legal-action length exceeds storage")
-            policy = d["policies"][i, :n].copy()
-            if n < 1 or not np.isfinite(policy).all() or (policy < 0).any() or not np.isclose(policy.sum(), 1, atol=1e-5):
-                raise ValueError("invalid replay policy")
-            sample = Sample(d["boards"][i].astype(np.float32), d["ids"][i, :n].copy(),
-                d["actions"][i, :n].astype(np.int32), policy, d["wdl"][i].copy(), float(d["weights"][i]),
-                histories[i]["fen"], histories[i]["moves"])
-            sample.validate()
-            samples.append(sample)
-        return samples, info

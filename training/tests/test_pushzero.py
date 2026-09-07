@@ -6,10 +6,9 @@ from tinygrad import Tensor
 from pushzero._native import State, SearchBatch
 from pushzero.model import ModelConfig, Network, Predictor
 from pushzero.learning import Learner, save_checkpoint, load_checkpoint
-from pushzero.replay import Sample, Replay, save_shard, load_shard
+from pushzero.replay import Sample, Replay
 from pushzero.search import search
 from pushzero.selfplay import collect, reduced_start, reanalyse
-from pushzero.run import TrainConfig, run_lock, train
 
 
 class ZeroPredictor:
@@ -91,14 +90,15 @@ def test_replay_roundtrip_and_truncation(tmp_path):
                             simulations=2,fast_simulations=1,max_plies=1,curriculum=0,full_fraction=1)
     assert all(g["truncated"] for g in games)
     assert all(s.value_weight == 0 and s.wdl.sum() == 0 for s in samples)
-    path = save_shard(tmp_path,samples,{})
-    restored,_ = load_shard(path)
+    replay = Replay()
+    replay.extend(samples)
+    restored = replay.samples
     np.testing.assert_array_equal(restored[0].board,samples[0].board)
     np.testing.assert_array_equal(restored[0].actions,samples[0].actions)
     renewed = reanalyse(restored,ZeroPredictor(),np.random.default_rng(2),2)
     assert all(s.value_weight == 0 for s in renewed)
     samples[0].wdl[1] = 1
-    with pytest.raises(ValueError): save_shard(tmp_path,samples,{})
+    with pytest.raises(ValueError): samples[0].validate()
 
 
 def test_rules_only_curriculum_is_valid():
@@ -134,22 +134,6 @@ def test_jit_learning_checkpoint_and_exact_next_update(tmp_path):
     for _ in range(3):
         a,b = learner.train(batch),loaded.train(batch)
         for key in a: assert a[key] == pytest.approx(b[key],abs=1e-5)
-
-
-def test_lock_and_training_resume(tmp_path):
-    with run_lock(tmp_path):
-        with pytest.raises(RuntimeError):
-            with run_lock(tmp_path): pass
-    config = TrainConfig(channels=8,blocks=1,actors=2,games=2,simulations=2,fast_simulations=1,
-                         max_plies=2,curriculum=0,full_fraction=1,batch_size=4,reuse=1)
-    first = train(tmp_path,config,minutes=1,iterations=1)
-    assert first["iteration"] == 1 and first["steps"] > 0
-    with pytest.raises(FileExistsError): train(tmp_path,config,minutes=1,iterations=1)
-    second = train(tmp_path,minutes=1,iterations=1,resume=True)
-    assert second["iteration"] == 2 and second["steps"] > first["steps"]
-    _,info = load_checkpoint(tmp_path/second["checkpoint"])
-    assert info["config"] == json.loads(json.dumps(config.__dict__))
-    assert len(info["shards"]) == 2
 
 
 def test_evaluation_counts_unfinished_separately(tmp_path):

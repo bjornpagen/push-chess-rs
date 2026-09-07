@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "pushzero"
 version = "0.1.0"
-description = "Rules-only Push Chess self-play with tinygrad and Metal"
+description = "Push Chess training from bumbledb with tinygrad and Metal"
 requires-python = ">=3.12"
 license-files = ["training/licenses/mctx-APACHE-2.0.txt"]
 dependencies = ["tinygrad==0.14.0", "numpy==2.5.3"]
