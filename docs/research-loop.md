@@ -6,20 +6,56 @@ commit and push verified implementation before production tournaments.
 
 ## Current generation
 
-The running Round 2 has fifteen entrants: Cataclysm and Astra controls, seven
+The completed Round 2 had fifteen entrants: Cataclysm and Astra controls, seven
 Cataclysm experiments, and six Astra experiments. Seven entrants are entirely
 neural-free; Abacus disables the NNUE score but still maintains its accumulator. See engine-lab.md
 for the precise hypotheses. These are candidates, not proven upgrades.
 
-The next executable adds Waypoint, an isolated actual-parent counter-move
+The current executable adds Waypoint, an isolated actual-parent counter-move
 context experiment. The registry now has 16 built-ins; `all` therefore schedules
-24,000 games at 100 pairs, not 21,000. Do not alter the live round. Test Waypoint
+24,000 games at 100 pairs, not 21,000. Do not reinterpret the sealed round. Test Waypoint
 against Cataclysm in fresh arenas before drawing any strength conclusion.
 
 The initial cutover uses fresh normalized bumbledb facts only. The Python/Metal
 source is retained in training/; runtime data belongs in data/corpus. No neural
 self-play campaign or full-model training is part of this research loop.
 Cataclysm NNUE refinement is in scope as a component of classical search.
+
+## Round 2 transition
+
+Round 2 finished all 21,000 games with terminal outcomes: 1,551,085 plies and
+1,425,085 search observations in 9,789.24 seconds. Its binary stays preserved
+under `data/bin/lab-b14e186c181fe92b`; later fixes are not attributed to that run.
+
+The exploratory aggregate leader is Abacus (63.68%), followed by Astra (60.11%).
+Cataclysm scored 56.30%; the direct Abacus/Cataclysm paired score is 55.75% over
+100 opening families. The simultaneous conservative family interval spans 50%,
+so this is a priority for fresh testing, not an automatic promotion. The sealed
+run predates the documented cross-game context-reset fix.
+
+The initial replay audit was stopped read-only after profiling showed repeated
+piece-delta query construction. The retained-query fix is committed in `5d19553`;
+the full audit then passed all 21,000 games in 126.07 seconds. See corpus-reader.md
+for evidence. Two castling-transit warnings were found among 571 castles; their
+exact references are in castling-transit-audit.md. The sealed v1 facts and rules
+remain unchanged; any candidate trained from them retains that provenance.
+
+Next bounded steps:
+
+1. Refine one isolated small residual on sealed Run 2 using Metal, compare
+   held-out loss to both the old network and the handwritten-only baseline,
+   and export under a new candidate name. Native inference remains the measured
+   winner; neither backend choice nor training loss establishes strength.
+2. Fresh 12-worker arenas compare Cataclysm, Abacus, Waypoint and the new
+   residual, with Astra as a strong neural-free opponent. Smoke first, then
+   enough independent opening families to investigate modest score gaps.
+3. Test a genuinely zero-NNUE Cataclysm-family representation as a separate
+   challenger: Abacus currently still updates and snapshots 256 accumulator
+   bytes even though it discards their score. Keep Abacus unchanged as the
+   mechanism control. The hypothesis is less work per identical node, not a
+   new evaluation formula. Use statically specialized state with no per-node
+   dispatch, preserve full fixed-node traces, measure whole search, then assess
+   fresh wall-time games. This representation experiment is not implemented yet.
 
 ## Round protocol
 

@@ -48,3 +48,24 @@ Only returned trajectories are page-bounded. Query indexes can scale with their
 source relations within resource limits; do not claim constant total read
 memory or duplicate these indexes in another application cache. Measure the
 full audit and Python loading path before making further storage changes.
+
+## Full Run 2 replay
+
+The release audit built from `5d19553` completed successfully in **126.07 s
+wall / 113.76 s user / 1.36 s system** on the same M2 Max. It verified all
+21,000 games, 1,551,085 moves and 1,425,085 analyses. Executable SHA256:
+`f072dbca075b1775f5f007cf54bc19c850ea8e713290238e3004b3db9b0c905f`.
+Disposable output is `data/round-0002-audit.log`; facts remain in bumbledb.
+
+The previous read-only audit was still unfinished when stopped after 27m58s
+elapsed (10m27.56s CPU). It is not a completed, interleaved baseline; do not
+turn the elapsed ratio into a claimed precise speedup. Other application work,
+cache state and time without scheduled CPU differed.
+
+A one-second sample 34 seconds into the new audit placed 661/727 main-thread
+observations in game reconstruction, now dominated by point reads (including
+PV facts), plus 61/727 in the separate trajectory validation. Selection-index
+construction was absent from this sample. Physical footprint was 335.7 MiB;
+the larger RSS includes mapped database pages and is not an application-heap
+measurement. This removes the diagnosed repeated work without claiming that
+all remaining read costs are optimal.

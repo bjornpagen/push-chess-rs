@@ -73,3 +73,19 @@ Do not silently replay v1 games as if they were generated under corrected
 rules, erase the run, or claim the affected proportion before the audit.
 Historical facts and new-rules training eligibility are separate questions.
 The diagnostic added here changes neither move generation nor the schema.
+
+## Actual Round 2 exposure
+
+The complete 2026-09-07 audit verified 21,000 games under unchanged v1 rules
+and found **571 castles, two transit warnings**:
+
+| Run | Game | Ply (zero-based) | Action ID |
+|---:|---:|---:|---:|
+| 2 | 12,764 | 24 | 262276 |
+| 2 | 14,797 | 19 | 265916 |
+
+This is two distinct games (0.00952% of the run), not evidence that the defect
+is impossible elsewhere or strategically harmless. Stored outcomes remain the
+actual v1 results. The audit does not relabel, erase or silently migrate them;
+any refinement using this run is explicitly v1-derived. A future rules cutover
+still needs the shared identity and occupied-transit tests described above.
