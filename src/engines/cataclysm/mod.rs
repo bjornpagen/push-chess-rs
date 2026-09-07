@@ -242,9 +242,25 @@ impl<const V: usize> Search<V> {
             + m.to as usize
     }
 
+    fn action_context(b: &Board, mv: Move) -> usize {
+        (b.pos.side_to_move as usize * 7 + b.pos.board[mv.from as usize].piece_type as usize) * 64
+            + mv.to as usize
+    }
+
+    fn parent_context(&self, ply: usize) -> Option<usize> {
+        if ply == 0 {
+            return None;
+        }
+        let index = self.previous[ply - 1];
+        // No real move has piece type None, so index zero denotes no action.
+        // Preserve historical lookup behavior in the unchanged controls.
+        (!experiments::PROFILES[V].exact_context || index != 0).then_some(index)
+    }
+
     fn prepare(&mut self, b: &Board, ply: usize, tt: u32) -> Vec<Action> {
         let mut actions = std::mem::take(&mut self.buffers[ply]);
         b.generate(&mut actions);
+        let counter = self.parent_context(ply).map(|parent| self.counters[parent]);
         for a in &mut actions {
             let id = pack(a.mv);
             if id == tt && tt != 0 {
@@ -265,7 +281,7 @@ impl<const V: usize> Search<V> {
             } else if id == self.killers[ply][1] {
                 score += 80_000;
             }
-            if ply > 0 && id == self.counters[self.previous[ply - 1]] {
+            if counter == Some(id) {
                 score += 70_000;
             }
             if experiments::PROFILES[V].ordering {
@@ -381,8 +397,16 @@ impl<const V: usize> Search<V> {
                 }
                 b.pos.ep_square = 64;
                 self.barrier = self.path.len();
+                let old_context = if experiments::PROFILES[V].exact_context {
+                    std::mem::replace(&mut self.previous[ply], 0)
+                } else {
+                    0
+                };
                 let reduction = (3 + depth / 5).min(depth - 1);
                 let v = -self.search(b, depth - 1 - reduction, -beta, 1 - beta, ply + 1, false);
+                if experiments::PROFILES[V].exact_context {
+                    self.previous[ply] = old_context;
+                }
                 b.pos.side_to_move = old.0;
                 b.pos.ep_square = old.1;
                 b.pos.zobrist = old.2;
@@ -411,9 +435,7 @@ impl<const V: usize> Search<V> {
             Self::pick(&mut actions, i);
             let a = &actions[i];
             let hi = Self::hi(b, a.mv);
-            let previous = (us as usize * 7 + b.pos.board[a.mv.from as usize].piece_type as usize)
-                * 64
-                + a.mv.to as usize;
+            let previous = Self::action_context(b, a.mv);
             let volatile = experiments::PROFILES[V].volatility && experiments::volatile_push(b, a);
             let undo = b.make(a);
             if b.checked(us) {
@@ -494,8 +516,8 @@ impl<const V: usize> Search<V> {
                         self.killers[ply][1] = self.killers[ply][0];
                         self.killers[ply][0] = best_id;
                     }
-                    if ply > 0 {
-                        self.counters[self.previous[ply - 1]] = best_id;
+                    if let Some(parent) = self.parent_context(ply) {
+                        self.counters[parent] = best_id;
                     }
                 }
                 break;
@@ -587,6 +609,11 @@ impl<const V: usize> Search<V> {
             if !check && !a.tactical() && !volatile && qply >= 2 {
                 continue;
             }
+            let context = if experiments::PROFILES[V].exact_context {
+                Self::action_context(b, a.mv)
+            } else {
+                0
+            };
             let undo = b.make(a);
             if b.checked(us) {
                 b.unmake(undo);
@@ -608,6 +635,9 @@ impl<const V: usize> Search<V> {
                 continue;
             }
             self.path.push(key);
+            if experiments::PROFILES[V].exact_context {
+                self.previous[ply] = context;
+            }
             let value = -self.qsearch(b, -beta, -alpha, ply + 1, qply + 1);
             self.path.pop();
             b.unmake(undo);
@@ -973,6 +1003,100 @@ mod tests {
             assert!(engine.previous.iter().all(|&index| index == 0));
             assert_eq!(observe(&mut engine), expected);
         }
+    }
+
+    #[test]
+    fn waypoint_counter_order_requires_a_real_parent() {
+        let mut engine = Search::<8>::with_hash_size(HashSize::MiB4);
+        let pos = start_position();
+        let board = Board::new(&pos);
+        let orders = |engine: &mut Search<8>| {
+            engine
+                .prepare(&board, 1, 0)
+                .into_iter()
+                .map(|a| (pack(a.mv), a.order))
+                .collect::<Vec<_>>()
+        };
+        let baseline = orders(&mut engine);
+        let chosen = baseline[0].0;
+        engine.counters[0] = chosen;
+        assert_eq!(engine.parent_context(0), None);
+        assert_eq!(engine.parent_context(1), None);
+        assert_eq!(orders(&mut engine), baseline);
+        engine.previous[0] = 80;
+        engine.counters[80] = chosen;
+        assert_eq!(engine.parent_context(1), Some(80));
+        for ((id, score), (before_id, before_score)) in orders(&mut engine).iter().zip(&baseline) {
+            assert_eq!(id, before_id);
+            assert_eq!(
+                *score,
+                before_score + if *id == chosen { 70_000 } else { 0 }
+            );
+        }
+    }
+
+    #[test]
+    fn waypoint_records_tactical_and_proof_edges_before_piece_changes() {
+        for (fen, expected) in [
+            ("7k/8/8/8/8/1p6/P7/K7 w - - 0 1", 81),
+            ("7k/P7/8/8/8/8/8/K7 w - - 0 1", 120),
+        ] {
+            let mut engine = Search::<8>::with_hash_size(HashSize::MiB4);
+            let pos = Position::try_from_fen(fen).unwrap();
+            let mut board = Board::new(&pos);
+            engine.previous.fill(895);
+            engine.limits.begin(
+                &SearchBudget {
+                    max_nodes: 2,
+                    ..SearchBudget::default()
+                },
+                94,
+            );
+            engine.qsearch(&mut board, -INF, INF, 0, 0);
+            assert_eq!(engine.previous[0], expected, "{fen}");
+            assert_eq!(board.pos.to_fen(), pos.to_fen());
+        }
+        let pos = Position::try_from_fen("7k/5K2/6Q1/8/8/8/8/8 w - - 0 1").unwrap();
+        let mut board = Board::new(&pos);
+        let mut engine = Search::<8>::with_hash_size(HashSize::MiB4);
+        engine.previous.fill(895);
+        engine.limits.begin(
+            &SearchBudget {
+                max_nodes: 4096,
+                ..SearchBudget::default()
+            },
+            94,
+        );
+        let line = engine.siege(&mut board, 1).expect("mate in one");
+        assert_eq!(line.len(), 1);
+        assert_eq!(
+            engine.previous[0],
+            Search::<8>::action_context(&board, line[0])
+        );
+        assert_eq!(board.pos.to_fen(), pos.to_fen());
+    }
+
+    #[test]
+    fn waypoint_restores_parent_context_after_interrupted_null_search() {
+        let pos = start_position();
+        let mut board = Board::new(&pos);
+        let mut engine = Search::<8>::with_hash_size(HashSize::MiB4);
+        engine.root_depth = 6;
+        engine.previous[1] = 89;
+        engine.limits.begin(
+            &SearchBudget {
+                max_nodes: 2,
+                ..SearchBudget::default()
+            },
+            94,
+        );
+        let beta = evaluate::<8>(&board) - 1;
+        engine.search(&mut board, 6, beta - 1, beta, 1, true);
+        assert_eq!(engine.limits.nodes, 2);
+        assert!(engine.limits.stopped);
+        assert_eq!(engine.previous[1], 89);
+        assert_eq!(board.pos.to_fen(), pos.to_fen());
+        assert_eq!(board.pos.zobrist, pos.zobrist);
     }
 
     #[test]

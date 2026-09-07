@@ -6,10 +6,15 @@ commit and push verified implementation before production tournaments.
 
 ## Current generation
 
-Fifteen entrants: Cataclysm and Astra controls, seven Cataclysm experiments,
-and six Astra experiments. Seven entrants are entirely neural-free; Abacus
-disables the NNUE score but still maintains its accumulator. See engine-lab.md
+The running Round 2 has fifteen entrants: Cataclysm and Astra controls, seven
+Cataclysm experiments, and six Astra experiments. Seven entrants are entirely
+neural-free; Abacus disables the NNUE score but still maintains its accumulator. See engine-lab.md
 for the precise hypotheses. These are candidates, not proven upgrades.
+
+The next executable adds Waypoint, an isolated actual-parent counter-move
+context experiment. The registry now has 16 built-ins; `all` therefore schedules
+24,000 games at 100 pairs, not 21,000. Do not alter the live round. Test Waypoint
+against Cataclysm in fresh arenas before drawing any strength conclusion.
 
 The initial cutover uses fresh normalized bumbledb facts only. The Python/Metal
 source is retained in training/; runtime data belongs in data/corpus. No neural

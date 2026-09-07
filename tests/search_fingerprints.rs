@@ -96,6 +96,7 @@ fn fixed_node_search_fingerprints() {
             ("tactician", 7540476717129506322),
             ("bedrock", 18143612453828631594),
             ("meridian", 10636715918183943797),
+            ("waypoint", 3445330567361932315),
         ]
     );
 }

@@ -66,6 +66,10 @@ pub const ENGINE_REGISTRY: &[EngineEntry] = &[
         name: "meridian",
         create: astra::create_experiment::<6>,
     },
+    EngineEntry {
+        name: "waypoint",
+        create: cataclysm::create_experiment::<8>,
+    },
 ];
 
 pub fn find_engine(name: &str) -> Option<&'static EngineEntry> {

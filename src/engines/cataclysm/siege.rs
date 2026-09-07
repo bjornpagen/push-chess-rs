@@ -65,6 +65,11 @@ impl<const V: usize> Search<V> {
         for i in 0..actions.len() {
             Self::pick(&mut actions, i);
             let a = &actions[i];
+            let context = if super::experiments::PROFILES[V].exact_context {
+                Self::action_context(b, a.mv)
+            } else {
+                0
+            };
             let undo = b.make(a);
             if b.checked(us) || (attacking && !b.checked(opponent(us))) {
                 b.unmake(undo);
@@ -73,6 +78,9 @@ impl<const V: usize> Search<V> {
             replies += 1;
             self.path.push(key);
             let child = if depth > 0 {
+                if super::experiments::PROFILES[V].exact_context {
+                    self.previous[ply] = context;
+                }
                 self.prove(b, depth - 1, ply + 1, limits)
             } else {
                 None

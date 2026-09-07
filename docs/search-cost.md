@@ -146,8 +146,9 @@ context indices, calls `new_game`, and requires cleared context plus identical
 not a reason to relax fingerprint checks. The existing 2,048-node all-profile
 fingerprints are not edited to hide it.
 
-Within-search tactical/NULL parent-context handling deserves a separate search
-experiment: explicit edge context could replace the scratch array entirely.
+Within-search tactical/NULL parent-context handling is now a separate search
+experiment, Waypoint (see engine-lab.md). It retains the compact scratch array
+but supplies real edge context throughout search and rejects absent parents.
 Do not mix that behavior change into a purported mechanism-only refactor.
 
 The current tournament's binary remains fixed. Its saved moves and outcomes
@@ -166,14 +167,44 @@ retains only an ordered list of at most seven friendly sources, not every plan.
 
 Exhaustive empty/friendly/enemy occupancy tests for every ray and both colors
 matched the full single-destination resolver, including exact displacement order
-and fused termination. The 15-profile fixed-node gate also matched. However,
-the first implementation left `Iterator::next` out of line, with repeated cursor
-loads/stores. Timing under concurrent builds was far too noisy to establish a
-small win, and the Synthesis reset failure correctly stopped the comparison.
-That candidate was removed from production while the reset issue was isolated.
+and fused termination. The 15-profile fixed-node gate also matched. After the
+Synthesis reset issue was isolated and fixed, comparison resumed against the
+repaired `23665cc` baseline.
 
-Resume from a newly built repaired baseline, inspect whether inlining eliminates
-the cursor round trips, and measure whole search again. The proven ray identity
-is not a license to assume the first implementation is faster. The disposable
-patch is in the local `/tmp/push-chess-search-cost.F1XSll/ray-experiment.patch`
-while that temporary directory survives; no alternate production backend remains.
+Inspecting emitted code mattered: both `#[inline]` and `#[inline(always)]`
+inlined the ray cursor into `Enumerate::next`, but left 18 static calls to that
+wrapper. The two annotation variants produced identical binaries. A direct
+cursor returning `(stop, destination, plan)`, with linear square stepping and
+without the enumerate/take adapters, removed those wrapper calls. That still
+does not establish a useful whole-search improvement.
+
+Eleven repetitions used four arms (baseline, adapter, direct, the identical
+baseline again) and four profiles, reversing arm order: 176 processes, each
+with the same 12 roots, one warmup and two measured passes. Every signature
+matched the repaired baseline. Median ms per pass:
+
+| Profile | Baseline | Adapter | Direct | Baseline repeat | Median direct/mean(baselines) |
+|---|---:|---:|---:|---:|---:|
+| Astra | 102.252 | 99.171 | 94.839 | 96.160 | 0.977 |
+| Cataclysm | 97.354 | 95.862 | 97.095 | 96.051 | 0.981 |
+| Synthesis | 115.483 | 129.580 | 111.905 | 116.212 | 0.986 |
+| Bedrock | 114.554 | 119.734 | 112.437 | 113.112 | 0.974 |
+
+The last column is the median within-repetition ratio, not a ratio of the
+independent column medians. Wide tails and control imbalance under the live
+tournament, other Rust builds and Spotlight activity make a 1–3% gain
+inconclusive. **Neither ray candidate is deployed.** All its production changes
+were removed; the current engine still uses the authoritative existing resolver.
+
+An idle confirmation must rebuild a baseline from the latest committed source,
+not compare newer context/search code to these old binaries. The proven ray
+identity is not a license to assume its implementation is faster. The disposable
+direct-cursor patch is in
+`/tmp/push-chess-search-cost.F1XSll/ray-direct.patch` while that directory
+survives; `ray-experiment.patch` is the older adapter version. No alternate
+production backend remains.
+
+Saved repaired-baseline executable SHA256:
+`d5c8532a73f77806590c28c5655bbb9c5abc07ef7ac6aa799dd3c1f988574c69`.
+Identical inline/always-inline adapter executable SHA256:
+`cd2cf2c42ac0e5981b1ab0d5f453f84f2838fe375616937eb8a30e2f48b413e9`.

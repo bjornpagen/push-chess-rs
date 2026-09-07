@@ -16,6 +16,7 @@ inside search. None of the new hypotheses is claimed to be stronger yet.
 | kinetic | Cataclysm | Phase-aware transaction ordering |
 | flashpoint | Cataclysm | Critical pushes unreduced; wider early quiescence |
 | synthesis | Cataclysm | Combined evaluation/order/tactical changes |
+| waypoint | Cataclysm | Actual parent-action context in tactical/proof search; absent context after NULL |
 | astra | Astra | Neural-free control |
 | sentinel | Astra | Mate/draw precedence and stalemate witnesses |
 | bastion | Astra | Sentinel plus obstruction-aware king pressure |
@@ -55,8 +56,8 @@ capacity. Astra uses inline scored moves with safe overflow. There are no
 database locks or Python calls in search. Teacher generation needs no GPU.
 
 Each worker lazily retains one engine per entrant, warms each once, and resets
-search history/table at each game boundary. A full 15-engine, 12-worker pool
-uses about 5.6 GiB for transposition tables, plus bounded search buffers and
+search history/table at each game boundary. A full 16-engine, 12-worker pool
+uses 6 GiB for transposition tables, plus bounded search buffers and
 database pages. The embedded network is shared once per process. There is one
 thread per selected worker; macOS places work across heterogeneous cores.
 Hard affinity, unsafe SIMD, custom allocators and speculative prefetching are
@@ -202,8 +203,46 @@ a separate held-out replication, and deeper-budget confirmation.
 4. Verify live status, full replay, search completion and database growth.
 5. Start the larger corpus campaign with explicit CPU/time/disk/game limits.
 
-A practical first campaign: all 15 engines, 100 pairs per matchup (21,000
-scheduled games), 12 workers, 100 ms/move, six opening plies, 512-ply cap,
+A practical first campaign used the original 15 engines, 100 pairs per matchup
+(21,000 scheduled games), 12 workers, 100 ms/move, six opening plies, 512-ply cap,
 eight-hour cap and 50-GiB store cap. Actual throughput/quality must be measured;
 the number scheduled is not a promise that all games finish within that cap.
 No automatic engine promotion or neural training occurs.
+
+The current registry adds Waypoint for future arenas; `--engines all` now means
+16 built-ins and 24,000 games at 100 pairs, before any supplied NNUE candidates.
+The already-running 15-entrant campaign is not expanded or restarted.
+
+## Waypoint: exact search-edge context
+
+This is an isolated search hypothesis, not a new evaluator or proven upgrade.
+Waypoint keeps Cataclysm's network, evaluation, pruning thresholds and table
+layout. Its counter-move key is still the compact `(side, mover piece type,
+destination)` tuple, not a claim to encode the complete action losslessly.
+The change is where that key comes from:
+
+- Main search already records the real parent action before descending.
+- Quiescence and mate-proof search now do so too, reading the mover **before**
+  applying the move (including promotion). An earlier sibling's context cannot
+  stand in for that edge.
+- A NULL edge has no actual move: clear its context during that search and
+  restore it even when the node budget interrupts the child.
+- Root and absent-parent contexts do not read or reward a counter-move entry.
+
+One per-node lookup supplies move ordering. Existing controls retain their
+within-search policy through const specialization, while all profiles keep the
+cross-game context-reset fix. The 15 existing 2,048-node fingerprints remain
+unchanged; Waypoint has its own new fingerprint. Tests cover absent-context
+rejection, the 70,000 ordering bonus, capture/promotion and proof edges, and
+restoration after interrupted NULL search.
+
+Verification on 2026-09-06: 104 Rust tests and 47 Python tests pass, as do both
+Clippy gates, formatting and the release all-profile fingerprint gate. The
+12-root, 8,192-node whole-search harness also passes Waypoint's three-pass
+repeatability/restoration check (signature `6867009960455420266`). Its contended
+timing is not a claim of greater speed or playing strength.
+
+After the current store owner exits and its corpus is audited, compare
+`--engines cataclysm,waypoint --purpose arena` on fresh color-swapped families,
+then confirm at a deeper wall-time budget. Keep NNUE refinement as a separate
+candidate so its effect is not confounded with this ordering change.

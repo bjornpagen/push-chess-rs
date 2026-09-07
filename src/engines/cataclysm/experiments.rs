@@ -13,6 +13,7 @@ pub struct Profile {
     pub logistics: bool,
     pub ordering: bool,
     pub volatility: bool,
+    pub exact_context: bool,
 }
 
 const CONTROL: Profile = Profile {
@@ -23,9 +24,10 @@ const CONTROL: Profile = Profile {
     logistics: false,
     ordering: false,
     volatility: false,
+    exact_context: false,
 };
 
-pub const PROFILES: [Profile; 8] = [
+pub const PROFILES: [Profile; 9] = [
     CONTROL,
     Profile {
         name: "abacus",
@@ -70,6 +72,12 @@ pub const PROFILES: [Profile; 8] = [
         logistics: true,
         ordering: true,
         volatility: true,
+        ..CONTROL
+    },
+    Profile {
+        name: "waypoint",
+        hypothesis: "Counter-move ordering uses the actual parent action in tactical/proof search and no parent after NULL",
+        exact_context: true,
         ..CONTROL
     },
 ];
