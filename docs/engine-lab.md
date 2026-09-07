@@ -43,6 +43,9 @@ remain family-specific. Cataclysm keeps four 16-byte table entries per bucket,
 Astra two; each engine has a 32 MiB table. Ordering pairs stay together because
 move and score are consumed/reordered together. This is a deliberate AoS use,
 not a blanket assertion that SoA is faster.
+The shared selector now retains its current maximum in a register instead of
+reloading it through a dependent index. Exact first/last tie behavior and all
+15 fixed-node fingerprints are preserved; see the [measured change](move-ordering.md).
 
 Cataclysm reuses per-ply action and quiet-history buffers and root history
 capacity. Astra uses inline scored moves with safe overflow. There are no

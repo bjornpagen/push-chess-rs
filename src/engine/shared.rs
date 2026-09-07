@@ -96,13 +96,17 @@ impl<E: Copy, const WAYS: usize> IndexMut<usize> for Buckets<E, WAYS> {
 
 /// Tie policy is explicit: historical Cataclysm chooses the last maximum,
 /// Astra the first. Sharing storage must not silently change search order.
+/// Scores must be stable during selection. Each remaining score is read once;
+/// keep the running maximum in a register, not behind a data-dependent index.
+/// Panics if `from` is not a valid item index.
 pub fn pick_best<T, const LAST: bool>(items: &mut [T], from: usize, score: impl Fn(&T) -> i32) {
     let mut best = from;
-    for i in from + 1..items.len() {
-        if score(&items[i]) > score(&items[best])
-            || (LAST && score(&items[i]) == score(&items[best]))
-        {
+    let mut high = score(&items[from]);
+    for (i, item) in items.iter().enumerate().skip(from + 1) {
+        let value = score(item);
+        if value > high || (LAST && value == high) {
             best = i;
+            high = value;
         }
     }
     items.swap(from, best);
@@ -136,5 +140,59 @@ mod tests {
         pick_best::<_, true>(&mut last, 0, |x| x.0);
         assert_eq!(first[0].1, 0);
         assert_eq!(last[0].1, 1);
+    }
+
+    #[test]
+    fn selection_preserves_exact_suffix_permutations_for_both_tie_policies() {
+        fn check<const LAST: bool>() {
+            // Exhaust tie-heavy lists, signed boundaries, arbitrary suffixes
+            // and repeated selections. Comparing scores alone misses ties.
+            for length in 1..=8 {
+                for code in 0usize..3usize.pow(length as u32) {
+                    let mut digits = code;
+                    let original: Vec<_> = (0..length)
+                        .map(|id| {
+                            let score = [i32::MIN, 0, i32::MAX][digits % 3];
+                            digits /= 3;
+                            (score, id)
+                        })
+                        .collect();
+                    let mut expected = original.clone();
+                    let mut actual = original.clone();
+                    for from in 0..length {
+                        crate::engine::ordering_probe::historical::<_, LAST>(
+                            &mut expected,
+                            from,
+                            |x| x.0,
+                        );
+                        pick_best::<_, LAST>(&mut actual, from, |x| x.0);
+                        assert_eq!(actual, expected);
+                        let mut suffix_expected = original.clone();
+                        let mut suffix_actual = original.clone();
+                        crate::engine::ordering_probe::historical::<_, LAST>(
+                            &mut suffix_expected,
+                            from,
+                            |x| x.0,
+                        );
+                        pick_best::<_, LAST>(&mut suffix_actual, from, |x| x.0);
+                        assert_eq!(suffix_actual, suffix_expected);
+                    }
+                }
+            }
+        }
+        check::<false>();
+        check::<true>();
+    }
+
+    #[test]
+    fn selection_reads_each_suffix_score_once() {
+        let calls = std::cell::Cell::new(0);
+        let mut data = [9, 2, 5, 3, 5];
+        pick_best::<_, false>(&mut data, 1, |x| {
+            calls.set(calls.get() + 1);
+            *x
+        });
+        assert_eq!(calls.get(), 4);
+        assert_eq!(data, [9, 5, 2, 3, 5]);
     }
 }

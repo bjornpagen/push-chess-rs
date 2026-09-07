@@ -997,6 +997,17 @@ pub fn create_experiment<const V: usize>() -> Box<dyn Engine> {
 mod tests {
     use super::*;
 
+    #[test]
+    #[ignore = "opt-in release ordering measurement, run serially on an idle machine"]
+    fn ordering_probe() {
+        let mut engine = Astra::<0>::new();
+        let samples: Vec<_> = crate::engine::ordering_probe::positions()
+            .iter()
+            .map(|p| engine.moves(p, 0, 0).to_vec())
+            .collect();
+        crate::engine::ordering_probe::compare::<_, false, _>("astra", &samples, |m| m.score);
+    }
+
     fn position(fen: &str) -> Position {
         let mut p = Position::default();
         p.set_from_fen(fen);

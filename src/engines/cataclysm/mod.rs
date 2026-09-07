@@ -872,6 +872,17 @@ pub fn verify_rules_with_model(pos: &Position, model: &Model) -> Result<usize, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "opt-in release ordering measurement, run serially on an idle machine"]
+    fn ordering_probe() {
+        let mut engine = Cataclysm::with_hash_size(HashSize::MiB4);
+        let samples: Vec<_> = crate::engine::ordering_probe::positions()
+            .iter()
+            .map(|p| engine.prepare(&Board::new(p), 0, 0))
+            .collect();
+        crate::engine::ordering_probe::compare::<_, true, _>("cataclysm", &samples, |a| a.order);
+    }
     use crate::core::position::start_position;
 
     #[test]

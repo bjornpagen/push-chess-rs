@@ -1,5 +1,7 @@
 use crate::core::position::Position;
 use crate::core::types::*;
+#[cfg(test)]
+pub(crate) mod ordering_probe;
 pub mod shared;
 
 /// Engine trait — equivalent to C++ Engine base class.
