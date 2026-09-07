@@ -185,6 +185,50 @@ pub fn resolve_knight_legs(
     to: Square,
     long_first: bool,
 ) -> Option<[PushPlan; 2]> {
+    let KnightRoute { mid, first, second } = knight_route(from, to, long_first)?;
+    let leg1 = resolve_push(pos, from, mid, first.0, first.1)?;
+    if leg1.captured.is_some() {
+        return None;
+    }
+
+    let mut intermediate = pos.board;
+    leg1.apply(&mut intermediate);
+    let leg2 = resolve_on_board(&intermediate, mid, to, second.0, second.1)?;
+
+    Some([leg1, leg2])
+}
+
+/// Exact capture predicate for attack queries; move generation still requests
+/// full transactions. The first leg moves pieces along its own ray, whose only
+/// intersection with the perpendicular second ray is the midpoint. Therefore
+/// the second leg's interior occupancy can be read from the ORIGINAL board.
+/// Capturing requires that interior to be empty (no capture through a chain).
+/// Share first-leg legality with the authoritative resolver, but do not copy
+/// the board, build a second plan, or compose displacements for a boolean.
+pub(crate) fn knight_captures(pos: &Position, from: Square, to: Square, long_first: bool) -> bool {
+    let Some(KnightRoute { mid, first, second }) = knight_route(from, to, long_first) else {
+        return false;
+    };
+    let mover = pos.board[from as usize];
+    let target = pos.board[to as usize];
+    if mover.is_empty() || target.is_empty() || target.color == mover.color {
+        return false;
+    }
+    let next = make_square(rank_of(mid) + second.0, file_of(mid) + second.1);
+    if next != to && !pos.board[next as usize].is_empty() {
+        return false;
+    }
+    resolve_push(pos, from, mid, first.0, first.1).is_some_and(|p| p.captured.is_none())
+}
+
+struct KnightRoute {
+    mid: Square,
+    first: (i32, i32),
+    second: (i32, i32),
+}
+
+#[inline]
+fn knight_route(from: Square, to: Square, long_first: bool) -> Option<KnightRoute> {
     if from >= 64 || to >= 64 {
         return None;
     }
@@ -207,14 +251,13 @@ pub fn resolve_knight_legs(
         rank_of(from) + first.0 * first.2,
         file_of(from) + first.1 * first.2,
     );
-    let leg1 = resolve_push(pos, from, mid, first.0, first.1)?;
-    if leg1.captured.is_some() {
-        return None;
-    }
-
-    let mut intermediate = pos.board;
-    leg1.apply(&mut intermediate);
-    let leg2 = resolve_on_board(&intermediate, mid, to, second.0, second.1)?;
-
-    Some([leg1, leg2])
+    Some(KnightRoute {
+        mid,
+        first: (first.0, first.1),
+        second: (second.0, second.1),
+    })
 }
+
+#[cfg(test)]
+#[path = "push_tests.rs"]
+mod tests;

@@ -3,7 +3,7 @@
 use super::eval::{PHASE, piece_score};
 use super::network::{Accumulator, Network};
 use crate::core::position::Position;
-use crate::core::push::{PushPlan, resolve_knight_push, resolve_push};
+use crate::core::push::{PushPlan, knight_captures, resolve_knight_push, resolve_push};
 use crate::core::types::*;
 use crate::core::zobrist::zobrist_tables;
 
@@ -141,10 +141,8 @@ impl<'net> Board<'net> {
         for (dr, df) in KNIGHTS {
             if let Some(from) = step(sq, dr, df)
                 && self.men[ti][2] & (1 << from) != 0
-                && (resolve_knight_push(&self.pos, from, sq, true)
-                    .is_some_and(|p| p.captured().is_some())
-                    || resolve_knight_push(&self.pos, from, sq, false)
-                        .is_some_and(|p| p.captured().is_some()))
+                && (knight_captures(&self.pos, from, sq, true)
+                    || knight_captures(&self.pos, from, sq, false))
             {
                 return true;
             }

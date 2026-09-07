@@ -1,4 +1,4 @@
-use super::push::{PushPlan, resolve_knight_push, resolve_push};
+use super::push::{PushPlan, knight_captures, resolve_knight_push, resolve_push};
 /// Position representation for Push Chess, ported from C++ `core/position.h` + `core/position.cc`.
 use super::types::*;
 use super::zobrist::zobrist_tables;
@@ -598,12 +598,10 @@ impl Position {
                     continue;
                 }
                 // Try both decompositions
-                let info1 = resolve_knight_push(self, ksq, sq, true);
-                if info1.is_some_and(|p| p.captured().is_some()) {
+                if knight_captures(self, ksq, sq, true) {
                     return true;
                 }
-                let info2 = resolve_knight_push(self, ksq, sq, false);
-                if info2.is_some_and(|p| p.captured().is_some()) {
+                if knight_captures(self, ksq, sq, false) {
                     return true;
                 }
             }
