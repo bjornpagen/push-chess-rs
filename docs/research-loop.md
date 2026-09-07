@@ -42,10 +42,11 @@ remain unchanged; any candidate trained from them retains that provenance.
 
 Next bounded steps:
 
-1. Refine one isolated small residual on sealed Run 2 using Metal, compare
-   held-out loss to both the old network and the handwritten-only baseline,
-   and export under a new candidate name. Native inference remains the measured
-   winner; neither backend choice nor training loss establishes strength.
+1. The first isolated small residual refinement finished 1,000 Metal steps and
+   improved held-out loss against both references; see nnue-round-2.md. Its
+   exported alias is Aurora-r2, not a replacement for the control. Native
+   inference remains the measured winner; neither backend choice nor training
+   loss establishes strength.
 2. Fresh 12-worker arenas compare Cataclysm, Abacus, Waypoint and the new
    residual, with Astra as a strong neural-free opponent. Smoke first, then
    enough independent opening families to investigate modest score gaps.
