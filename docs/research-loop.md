@@ -37,6 +37,8 @@ Cataclysm NNUE refinement is in scope as a component of classical search.
 5. When the process has actually stopped, audit the run. Read paired results,
    draw/unknown rates, opening asymmetry, search completion, tactical mistakes,
    nodes/time and corpus growth. Data, not a roster name, determines priority.
+   Inspect `castling_audit` before any rules/version decision; see
+   castling-transit-audit.md. Its warnings do not reclassify saved v1 outcomes.
 6. Choose a small next generation of falsifiable changes. Preserve controls
    and diverse high-quality opponents. Test changes individually before combining.
 7. Run fresh paired comparisons and a second corpus tournament. Repeat with

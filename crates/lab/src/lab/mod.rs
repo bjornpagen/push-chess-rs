@@ -64,8 +64,17 @@ pub struct Trajectory {
     pub plies: Vec<Ply>,
 }
 
+/// Read-only observations from the same exact-history validation pass.
+/// An anomaly does not reinterpret a v1 move, result or training label.
+#[derive(Default, Debug)]
+pub struct ReplayAudit {
+    pub castles: u64,
+    /// Castling accepted while its ordinary one-square king transit is illegal.
+    pub castling_transit_anomalies: Vec<usize>,
+}
+
 impl Trajectory {
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<ReplayAudit> {
         use push_chess::core::position::Position;
         use push_chess::game::{Outcome, adjudicate};
         if self.plies.len() > 4096 || self.pair != Some(self.index / 2) {
@@ -73,6 +82,7 @@ impl Trajectory {
         }
         let mut pos = Position::try_from_fen(&self.initial_fen)?;
         let mut legal = Vec::new();
+        let mut audit = ReplayAudit::default();
         for (ply, record) in self.plies.iter().enumerate() {
             legal_moves(&mut pos, &mut legal);
             if adjudicate(&pos, &legal) != Outcome::Playing {
@@ -97,6 +107,19 @@ impl Trajectory {
                 .iter()
                 .find(|m| m.id() == record.action)
                 .ok_or("illegal stored action")?;
+            if mv.special == push_chess::core::types::SpecialMove::Castle {
+                audit.castles += 1;
+                let transit = push_chess::core::types::Move {
+                    from: mv.from,
+                    to: (mv.from + mv.to) / 2,
+                    ..Default::default()
+                };
+                // Reuse the authoritative legal set already generated for
+                // validation: no geometric substitute or second rules engine.
+                if !legal.contains(&transit) {
+                    audit.castling_transit_anomalies.push(ply);
+                }
+            }
             pos.make_move(mv);
         }
         legal_moves(&mut pos, &mut legal);
@@ -117,7 +140,7 @@ impl Trajectory {
                 return Err("opening family or split mismatch".into());
             }
         }
-        Ok(())
+        Ok(audit)
     }
 }
 

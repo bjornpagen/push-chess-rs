@@ -352,6 +352,8 @@ impl Corpus {
         let (mut games, mut moves, mut analyses, mut complete, mut terminal) =
             (0u64, 0u64, 0u64, 0u64, 0u64);
         let (mut wall_us, mut nodes, mut overruns) = (0u64, 0u64, 0u64);
+        let (mut castles, mut transit_anomalies) = (0u64, 0u64);
+        let mut transit_examples = Vec::new();
         for index in 0..(config.total_pairs() * 2) as u64 {
             let w = work()?;
             let snapshot = self.db.snapshot(&w)?;
@@ -364,7 +366,15 @@ impl Corpus {
                 continue;
             };
             let game = relational::read_game(&frame, &g)?;
-            game.validate()?;
+            let audit = game.validate()?;
+            castles += audit.castles;
+            transit_anomalies += audit.castling_transit_anomalies.len() as u64;
+            for ply in audit.castling_transit_anomalies {
+                if transit_examples.len() < 32 {
+                    transit_examples
+                        .push(json!({"game":index,"ply":ply,"action":game.plies[ply].action}));
+                }
+            }
             games += 1;
             moves += game.plies.len() as u64;
             terminal += u64::from(game.white_value.is_some());
@@ -382,7 +392,10 @@ impl Corpus {
         Ok(
             json!({"run":run,"verified_games":games,"moves":moves,"positions":moves+games,
             "analyses":analyses,"completed_searches":complete,"terminal_games":terminal,
-            "search_wall_us":wall_us,"search_nodes":nodes,"time_overruns":overruns}),
+            "search_wall_us":wall_us,"search_nodes":nodes,"time_overruns":overruns,
+            "castling_audit":{"castles":castles,"transit_anomalies":transit_anomalies,
+                "examples":transit_examples,"example_limit":32,
+                "meaning":"Current-rules legal castle whose ordinary one-square king transit is illegal. Warning only; no move/result reclassification."}}),
         )
     }
     /// Short-lived snapshots: never pin an hours-long read across map growth.
@@ -804,6 +817,91 @@ mod tests {
                 .page(&game.split, (0, 0), 8, Some(&[runs[1]]))
                 .is_err()
         );
+        corpus.close().unwrap();
+    }
+
+    #[test]
+    fn castling_audit_counts_exposure_without_reclassifying_v1_games() {
+        use push_chess::core::{position::Position as Board, types as c};
+        let fixtures = [
+            ("k7/8/8/8/8/8/7n/4K2R w K - 0 1", true),
+            ("7k/8/8/8/8/8/1n6/R3K3 w Q - 0 1", true),
+            ("4k2r/7N/8/8/8/8/8/K7 b k - 0 1", true),
+            ("r3k3/1N6/8/8/8/8/8/7K b q - 0 1", true),
+            ("k7/8/8/8/8/8/8/4K2R w K - 0 1", false),
+            ("7k/8/8/8/8/8/8/R3K3 w Q - 0 1", false),
+            ("4k2r/8/8/8/8/8/8/K7 b k - 0 1", false),
+            ("r3k3/8/8/8/8/8/8/7K b q - 0 1", false),
+            // Knight geometry alone is not control in push chess: the pawn
+            // blocks one route and h1's enemy rook blocks the other.
+            ("k7/8/8/8/8/8/6Pn/4K2R w K - 0 1", false),
+        ];
+        let (_dir, mut corpus) = create();
+        let mut config = config();
+        config.pairs = fixtures.len();
+        let run = corpus.start(&config).unwrap();
+        for (i, (fen, anomaly)) in fixtures.into_iter().enumerate() {
+            let mut board = Board::try_from_fen(fen).unwrap();
+            let mut legal = Vec::new();
+            super::super::legal_moves(&mut board, &mut legal);
+            let mv = *legal
+                .iter()
+                .find(|m| m.special == c::SpecialMove::Castle)
+                .unwrap();
+            let record = super::super::Ply {
+                action: mv.id(),
+                origin: "opening",
+                side: board.side_to_move as i32,
+                score: None,
+                score_perspective: "stm",
+                search_complete: false,
+                nodes: 0,
+                depth: 0,
+                seldepth: 0,
+                wall_us: 0,
+                reported_us: 0,
+                pv: vec![],
+                diagnostics: c::SearchDiagnostics::default(),
+                pieces: board.board.iter().filter(|p| !p.is_empty()).count() as u32,
+                halfmove_clock: board.halfmove_clock,
+            };
+            board.make_move(&mv);
+            super::super::legal_moves(&mut board, &mut legal);
+            let (ending, value) =
+                super::super::terminal(&push_chess::game::adjudicate(&board, &legal));
+            let key = super::super::opening_key(fen, std::iter::once(mv.id()));
+            let game = Trajectory {
+                index: i * 2,
+                pair: Some(i),
+                white: "cataclysm".into(),
+                black: "kinetic".into(),
+                initial_fen: fen.into(),
+                final_fen: board.to_fen(),
+                opening_key: key.clone(),
+                split: super::super::split(&key).into(),
+                termination: ending.into(),
+                white_value: value,
+                plies: vec![record],
+            };
+            let audit = game.validate().unwrap();
+            assert_eq!(audit.castles, 1);
+            assert_eq!(
+                audit.castling_transit_anomalies,
+                if anomaly { vec![0] } else { vec![] }
+            );
+            corpus.save(run, &game).unwrap();
+        }
+        corpus.finish(run, "finished", None).unwrap();
+        let report = corpus.verify(run).unwrap();
+        assert_eq!(report["verified_games"], 9);
+        assert_eq!(report["castling_audit"]["castles"], 9);
+        assert_eq!(report["castling_audit"]["transit_anomalies"], 4);
+        let examples = report["castling_audit"]["examples"].as_array().unwrap();
+        assert_eq!(examples.len(), 4);
+        for (i, example) in examples.iter().enumerate() {
+            assert_eq!(example["game"], i * 2);
+            assert_eq!(example["ply"], 0);
+        }
         corpus.close().unwrap();
     }
 

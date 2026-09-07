@@ -41,9 +41,10 @@ The normal rules, replay and native/Python tests are required as well. These
 are behavior-preservation gates, not evidence of stronger play.
 
 This change preserves the existing treatment of an empty attack target.
-Castling checks on empty transit squares warrant a separate rules investigation;
-they are not silently reinterpreted by this performance refactor. Do not change
-the rules version or discard a corpus based on that unresolved question alone.
+The separate [castling investigation](castling-transit-audit.md) now reproduces
+transit exposure in both colors/wings and adds a read-only corpus audit.
+It does not silently reinterpret the rules in this performance refactor.
+Do not discard a corpus or claim its exposure before the actual audit.
 
 ## Measurements and limits
 
