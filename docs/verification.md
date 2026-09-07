@@ -123,3 +123,65 @@ All launched smoke/pilot/evaluation processes have completed; no unattended
 long training or automatic restart was installed. The next useful experiment
 is a predeclared equal-training-budget plain/global/effect ablation, alongside
 the inference-latency work, before choosing an expensive long-run architecture.
+
+## Rolling self-play follow-up — 2026-09-06
+
+The subsequently authorized eight-hour continuation was explicitly stopped by
+the user for this redesign. SIGTERM checkpointed iteration 8, 358 completed
+optimizer steps, 256 recorded games, and 26 pending updates. No hard kill or
+checkpoint deletion was necessary.
+
+Implementation `a63ec17` and follow-up `1d3a087` were pushed directly to `main`
+before production training resumed. The serial/draining production path was
+replaced, not retained as a fallback. See [the invariants](rolling-selfplay.md).
+
+Validation before training:
+
+- Rust workspace/all-features: 75 tests and one doctest passed again.
+- Actual wasm32 target check passed; native Python adapter strict Clippy passed.
+- First full Python/Metal pass: 31 tests passed in 29.43 s. After adding the CLI
+  resume-override regression, all **32 passed in 25.14 s**.
+- New tests cover multiple outstanding/reordered leases, duplicate/invalid
+  replies, output ownership, finishing a lane while another lease is held,
+  explicit capacity, rolling replacement without waiting for long games,
+  retained targets and mixed weight provenance, snapshot reconstruction and
+  corruption rejection, and no RNG consumption before pending learning.
+
+### Frozen-weight throughput sweeps
+
+Same 353,060-parameter global/effect checkpoint (358 steps), two native workers,
+16-tree search groups, full/fast simulations 64/16 at .25 full probability,
+64-ply benchmark cap, .25 sparse starts, 64 MiB exact cache. These sweeps do not
+train. Settings and independent identity controls are interleaved twice; each
+arm gets a separate warm-up. Timings include any subsequent new-shape captures.
+
+| Actors | Inference rows | Fresh evaluations/s (median) | Useful rows/device batch | Moves/s |
+|---:|---:|---:|---:|---:|
+| 32 | 32 | 1,867 | 15.0 | 74 |
+| 64 | 32 | 3,055 | 27.8 | 121 |
+| 128 | 64 | 5,249 | 55.3 | 198 |
+| 256 | 128 | 8,277 | 103.8 | 343 |
+| 512 | 256 | 11,266 | 224.9 | 422 |
+| 1,024 | 256 | 10,876 | 219.8 | 425 |
+
+First four rows: `experiments/rolling-throughput-20260906.json`, 10 s requested
+warm-up + 12 s measured intervals (soft move-boundary drains). Last two rows:
+`experiments/rolling-throughput-wide-20260906.json`, 12 s warm-up + 20 s measured;
+recorded source `a63ec17`, clean at launch. Its 256/128 reference measured 8,397
+fresh evaluations/s; its identity measured 7,670. The first sweep's 32/32
+identity measured 1,855. Do not treat a cross-sweep ratio as a precise paired
+speedup. The approximate sixfold throughput difference is not an Elo claim.
+
+Selected **512 actors / 256 inference rows / 16-tree groups / two workers**.
+Doubling actors again at the same inference batch size did not materially help.
+This is the best tested region, not a proof that no larger batch could help.
+Observed whole-machine GPU activity remained about 53% for the selected arm;
+this is neither training-only utilization nor percent of theoretical FLOPS.
+Selected-arm process RSS peaks were 680–911 MB within a multi-arm process;
+RSS is not GPU memory and allocator retention affects cross-arm comparisons.
+The follow-up sampler separately records tinygrad live buffer bytes and
+system-wide GPU memory; neither is silently substituted for process memory.
+
+Frozen-weight throughput is not training throughput. Learning, checkpoint I/O,
+reanalysis, and revision-triggered graph rebuilds must be measured in the resumed
+run. The actor checkpoint allows those updates without draining the game pool.
