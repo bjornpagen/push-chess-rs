@@ -2,7 +2,30 @@
 
 The user has authorized ongoing local engine research until stopped. This is
 an open-ended objective, not a promise of an unbeatable engine. Work on main;
-commit and push verified implementation before production tournaments.
+commit and push verified implementation.
+
+## Current authorization — 2026-09-07
+
+Let the already-running **Run 4** comparison finish, then **do not start another
+tournament**. This includes arena comparisons, smoke rounds, and self-play or
+match campaigns. The user's latest instruction supersedes the older repeated
+tournament protocol below; a new campaign requires explicit reauthorization.
+
+Continue improving this generation through code review, regression tests,
+measured optimizations, exact-history failure analysis, and bounded NNUE
+refinement from audited, sealed corpus runs. Ordinary automated tests use only
+disposable fixtures, never the live corpus. Arena games remain held out from
+training. Benchmark speed and prediction loss do not establish playing strength;
+record untested candidates without starting games to validate them.
+
+The previous conversation, `Find best push chess model`, failed because its
+provider rejected continuation of that session. Work resumed in task
+`01a07bcd-a1a4-7ec0-8e52-b1239c048c8c`; the tournament itself survived. Its owner
+is PID 56591, with immutable executable SHA256
+`f072dbca075b1775f5f007cf54bc19c850ea8e713290238e3004b3db9b0c905f`.
+Recheck actual process identity and live status rather than trusting a saved PID.
+The old `push-chess-engine-research` heartbeat disappeared during recovery;
+updating it failed because it no longer exists. It has not been recreated.
 
 ## Current generation
 
@@ -11,10 +34,11 @@ Cataclysm experiments, and six Astra experiments. Seven entrants are entirely
 neural-free; Abacus disables the NNUE score but still maintains its accumulator. See engine-lab.md
 for the precise hypotheses. These are candidates, not proven upgrades.
 
-The current executable adds Waypoint, an isolated actual-parent counter-move
-context experiment. The registry now has 16 built-ins; `all` therefore schedules
-24,000 games at 100 pairs, not 21,000. Do not reinterpret the sealed round. Test Waypoint
-against Cataclysm in fresh arenas before drawing any strength conclusion.
+The current source adds Waypoint, an isolated actual-parent counter-move
+context experiment, and Granite, an Abacus-equivalent neural-free representation.
+The registry now has 17 built-ins; `all` would therefore schedule 27,200 games
+at 100 pairs, not 21,000. Do not launch that campaign or reinterpret a sealed
+round. Waypoint is already included in Run 4; Granite is not. Neither is promoted.
 
 The initial cutover uses fresh normalized bumbledb facts only. The Python/Metal
 source is retained in training/; runtime data belongs in data/corpus. No neural
@@ -47,18 +71,21 @@ Next bounded steps:
    exported alias is Aurora-r2, not a replacement for the control. Native
    inference remains the measured winner; neither backend choice nor training
    loss establishes strength.
-2. Fresh 12-worker arenas compare Cataclysm, Abacus, Waypoint and the new
-   residual, with Astra as a strong neural-free opponent. Smoke first, then
-   enough independent opening families to investigate modest score gaps.
-3. Test a genuinely zero-NNUE Cataclysm-family representation as a separate
-   challenger: Abacus currently still updates and snapshots 256 accumulator
-   bytes even though it discards their score. Keep Abacus unchanged as the
-   mechanism control. The hypothesis is less work per identical node, not a
-   new evaluation formula. Use statically specialized state with no per-node
-   dispatch, preserve full fixed-node traces, measure whole search, then assess
-   fresh wall-time games. This representation experiment is not implemented yet.
+2. Let Run 4's existing 12-worker comparison of Cataclysm, Abacus, Waypoint,
+   Aurora-r2 and Astra finish. Audit after the owner exits, inspect paired
+   outcomes and failure modes, then improve the models without another arena.
+3. Finish the Granite representation experiment: Abacus still updates and
+   snapshots 256 accumulator bytes even though it discards their score;
+   Granite has no weights, accumulator updates or neural undo bytes. Its shared,
+   statically specialized search preserves Abacus's fixed-node behavior and
+   leaves Abacus unchanged as the mechanism control. Tests pass; repeat whole-
+   search timings once the machine is idle. Do not run wall-time games or
+   interpret a faster benchmark as evidence of greater strength.
 
-## Round protocol
+## Historical round protocol — not authorized for another run
+
+Retained for reproducibility only. The current authorization above forbids
+starting the next smoke, arena or corpus round without a new user instruction.
 
 1. Verify rules, all engine profiles, relational rejection/round-trip tests,
    direct Python page reading and tiny Metal update/checkpoint correctness.
@@ -136,8 +163,9 @@ before trajectory replay or feature construction.
 
 ## Process ownership and resource policy
 
-The 30-minute task heartbeat follows this same task and checkout. Before
-starting any run, inspect the actual process and `lab status --db data/corpus`.
+No replacement heartbeat is currently installed. If the user restores one,
+it must follow this task and its no-more-tournaments constraint. Inspect the
+actual process and `lab status --db data/corpus` before accessing the corpus.
 Never start a second writer, infer death from silence, or reopen the live store
 from Python. The running owner answers status using committed bumbledb snapshots.
 When stopped, `summary`, `report` and `verify` open the store directly.

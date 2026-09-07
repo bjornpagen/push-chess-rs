@@ -1,5 +1,48 @@
 # Whole-search cost: retain only the changes that win
 
+## Granite: neural-free representation
+
+Recovery measurement on 2026-09-07, Apple M2 Max, while Run 4 still occupied all
+12 tournament workers. The saved pre-refactor executable is from `f5f1334`;
+the candidate changes only representation for existing profiles and adds Granite,
+whose policy is Abacus without unused neural weights, updates or undo bytes.
+
+The existing 12-root, 8,192-node harness ran 11 repetitions of seven arms:
+old Cataclysm / new Cataclysm / old Cataclysm, then old Abacus / new Abacus /
+Granite / old Abacus. Every other repetition reversed the entire arm order.
+Each process had one warmup and two measured passes. All 77 processes passed
+repeatability and state restoration. Both Cataclysm binaries expanded 72,715
+nodes with signature `4018462444417976583`; both Abacus binaries and Granite
+expanded 70,901 nodes with signature `8193378680742388660`.
+
+Median milliseconds per 12-root pass:
+
+| Profile | Pre-refactor | New representation | Pre-refactor repeat |
+|---|---:|---:|---:|
+| Cataclysm | 149.791 | 146.472 | 145.237 |
+| Abacus | 133.585 | 128.145 | 128.520 |
+| Granite (against Abacus) | 133.585 | 121.416 | 128.520 |
+
+The median within-repetition ratio against the mean of the two baseline arms
+was 1.0133 for Cataclysm, 1.0154 for Abacus and 0.9806 for Granite. Individual
+Granite ratios ranged from 0.7256 to 1.1729. Against Abacus in the *same* new
+binary, Granite's median ratio was 0.9573. Ratios are not calculated from the
+independent column medians.
+
+The baseline variation is far larger than the apparent gain: **no speedup or
+control-regression conclusion is justified by this contended measurement**.
+The verified result is identical fixed-node behavior with 256 fewer neural undo
+bytes and no neural updates. Keep the challenger isolated; repeat the bracketed
+test when Run 4 is finished and the machine is otherwise idle. The user's latest
+instruction forbids another tournament, so playing strength remains untested.
+
+Saved executables (ignored local benchmark artifacts, not game datasources):
+
+- Baseline: `data/bin/search-cost-f57709d4f75809ed`, SHA256
+  `f57709d4f75809ed78bfee2070c82ac73ff63ece94c5e11624f3e180de64ac4f`.
+- Candidate: `data/bin/search-cost-2b6630e805913de2`, SHA256
+  `2b6630e805913de25d90348850a489376672a0130106be9cb2d0af2db06beea0`.
+
 ## Protocol
 
 `tests/search_cost.rs` is an ignored, bounded measurement harness, not a playing

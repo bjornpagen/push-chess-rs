@@ -1,6 +1,6 @@
 //! Incremental piece-square baseline and outcome-trained neural evaluation.
 //! No database access, opponent identity, or memorized game moves.
-use super::board::Board;
+use super::board::{Board, Residual};
 use super::network::{SCORE_LIMIT, TEMPO};
 use crate::core::types::*;
 use std::sync::LazyLock;
@@ -38,7 +38,7 @@ pub fn piece_score(p: Piece, sq: u8) -> (i32, i32) {
     PST[p.color as usize][p.piece_type as usize][sq as usize]
 }
 
-pub(super) fn baseline_white(b: &Board) -> i32 {
+pub(super) fn baseline_white(b: &Board<impl Residual>) -> i32 {
     let phase = b.phase.min(24);
     let baseline = ((b.mg[0] - b.mg[1]) * phase + (b.eg[0] - b.eg[1]) * (24 - phase)) / 24;
     let mut white = baseline;
@@ -60,9 +60,9 @@ pub(super) fn baseline_white(b: &Board) -> i32 {
     white
 }
 
-pub fn evaluate<const V: usize>(b: &Board) -> i32 {
+pub fn evaluate<const V: usize>(b: &Board<impl Residual>) -> i32 {
     let profile = super::experiments::PROFILES[V];
-    let mut white = baseline_white(b) + profile.neural_scale * b.net.white_residual(b.model);
+    let mut white = baseline_white(b) + profile.neural_scale * b.net.white_residual();
     if profile.geometry {
         white += super::experiments::geometry(b);
     }

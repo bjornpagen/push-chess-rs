@@ -191,6 +191,17 @@ mod tests {
     }
 
     #[test]
+    fn granite_metadata_has_no_network_while_abacus_retains_its_control() {
+        let roster = Roster::builtins(&["abacus".into(), "granite".into()]).unwrap();
+        assert!(roster.entries[0].network_fingerprint().is_some());
+        assert_eq!(roster.entries[1].network_fingerprint(), None);
+        assert!(!roster.entries[1].info().neural_accumulator);
+        assert!(!roster.entries[1].info().neural_evaluation);
+        assert_eq!(roster.create(1).name(), "granite");
+        assert!(Candidate::decode("granite", CONTROL).is_err());
+    }
+
+    #[test]
     fn candidate_identity_binds_full_weights_and_binary() {
         let mut changed = CONTROL.to_vec();
         changed[0] ^= 1;

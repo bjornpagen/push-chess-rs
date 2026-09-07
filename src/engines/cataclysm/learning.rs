@@ -34,7 +34,7 @@ pub fn input(pos: &Position) -> Input {
     }
     Input {
         ids,
-        baseline: baseline_white(&Board::new(pos)),
+        baseline: baseline_white(&Board::handwritten(pos)),
     }
 }
 

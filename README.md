@@ -1,7 +1,7 @@
 # Push Chess training ground
 
 A native engine laboratory and a fresh training corpus. Cataclysm and Astra
-are controls; fourteen independently named challengers test evaluation and
+are controls; fifteen independently named challengers test evaluation and
 search hypotheses. Results—not names—determine which experiments survive.
 
 **bumbledb is the only durable source for tournament runs, entrants, complete
@@ -12,6 +12,11 @@ positions, exact piece changes, principal-variation steps and results—no
 stored JSON/FEN blobs. See [the relational model](docs/engine-lab.md#one-bumbledb-schema).
 
 ## Engine laboratory
+
+Current research constraint: finish Run 4, then launch no further tournaments
+(including smoke or arena rounds). Continue code/model improvement instead;
+see [the current authorization](docs/research-loop.md#current-authorization--2026-09-07).
+The commands below document the interface, not permission to start another run.
 
 ```sh
 cargo test --workspace
@@ -25,8 +30,8 @@ target/release/lab tournament --db data/corpus --engines all \
   --max-seconds 86400 --max-gib 50
 ```
 
-That 16-engine roster has 120 matchups: 500 color-swapped pairs per matchup
-schedules 120,000 games. Matchups interleave. Time, disk and game caps are explicit;
+That 17-engine roster has 136 matchups: 500 color-swapped pairs per matchup
+schedules 136,000 games. Matchups interleave. Time, disk and game caps are explicit;
 the first reached ends admission. SIGINT/SIGTERM safely stop at move boundaries.
 The disk cap is checked between commits and may overshoot by in-flight games.
 

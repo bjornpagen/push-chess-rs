@@ -190,6 +190,22 @@ def test_candidate_actual_search_isolated_identity_and_bounded_analysis():
     with pytest.raises(ValueError): candidate.new_game(side=2)
 
 
+def test_granite_uses_the_shared_native_search_without_a_network():
+    from pushzero._native import Opponent
+    abacus, granite = Opponent("abacus"), Opponent("granite")
+    assert abacus.network_fingerprint() is not None
+    assert granite.network_fingerprint() is None
+    with pytest.raises(ValueError, match="cannot replace"): Opponent("granite", NNUE_CONTROL)
+    for state in positions(8):
+        abacus.new_game()
+        granite.new_game()
+        for _ in range(2):
+            a = abacus.analyse(state, time_ms=0, nodes=2048)
+            b = granite.analyse(state, time_ms=0, nodes=2048)
+            for key in a:
+                if key != "wall_us": np.testing.assert_array_equal(a[key], b[key])
+
+
 @pytest.mark.parametrize("jit", [False, True])
 def test_tiny_update_export_and_optimizer_resume_are_exact(tmp_path, jit):
     states = positions(4)

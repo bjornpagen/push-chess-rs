@@ -97,6 +97,8 @@ fn fixed_node_search_fingerprints() {
             ("bedrock", 18143612453828631594),
             ("meridian", 10636715918183943797),
             ("waypoint", 3445330567361932315),
+            // Granite must preserve Abacus's exact fixed-node behavior.
+            ("granite", 18076246204620320795),
         ]
     );
 }

@@ -53,19 +53,71 @@ impl Action {
     }
 }
 
-pub struct Board<'net> {
-    pub model: &'net Network,
+/// Static board policy: only the mutable residual state enters undo records.
+/// Search is monomorphized; there is no per-move enum or virtual dispatch.
+pub trait Residual: Copy {
+    type Undo: Copy;
+    fn snapshot(&self) -> Self::Undo;
+    fn restore(&mut self, saved: Self::Undo);
+    fn update(&mut self, piece: Piece, sq: u8, sign: i32);
+    fn white_residual(&self) -> i32;
+}
+
+#[derive(Clone, Copy)]
+pub struct Neural<'net> {
+    model: &'net Network,
+    accumulator: Accumulator,
+}
+impl<'net> Neural<'net> {
+    pub fn new(model: &'net Network) -> Self {
+        Self {
+            model,
+            accumulator: Accumulator::new(model),
+        }
+    }
+}
+impl Residual for Neural<'_> {
+    type Undo = Accumulator;
+    fn snapshot(&self) -> Self::Undo {
+        self.accumulator
+    }
+    fn restore(&mut self, saved: Self::Undo) {
+        self.accumulator = saved;
+    }
+    fn update(&mut self, piece: Piece, sq: u8, sign: i32) {
+        self.accumulator.update(piece, sq, sign, self.model);
+    }
+    fn white_residual(&self) -> i32 {
+        self.accumulator.white_residual(self.model)
+    }
+}
+
+/// No weights, accumulator, undo bytes, or arithmetic. This is not a second
+/// handwritten evaluator: both policies share the exact same board baseline.
+#[derive(Clone, Copy)]
+pub struct Handwritten;
+impl Residual for Handwritten {
+    type Undo = ();
+    fn snapshot(&self) {}
+    fn restore(&mut self, _: ()) {}
+    fn update(&mut self, _: Piece, _: u8, _: i32) {}
+    fn white_residual(&self) -> i32 {
+        0
+    }
+}
+
+pub struct Board<R: Residual = Neural<'static>> {
     pub pos: Position,
     pub men: [[u64; 7]; 2],
     pub occupied: [u64; 2],
     pub mg: [i32; 2],
     pub eg: [i32; 2],
     pub phase: i32,
-    pub net: Accumulator,
+    pub net: R,
     pub material: [i32; 2],
 }
 
-pub struct Snapshot {
+pub struct Snapshot<N: Copy = Accumulator> {
     board: [Piece; 64],
     kings: [u8; 2],
     key: u64,
@@ -78,18 +130,31 @@ pub struct Snapshot {
     mg: [i32; 2],
     eg: [i32; 2],
     phase: i32,
-    net: Accumulator,
+    net: N,
     material: [i32; 2],
 }
 
-impl Board<'static> {
+#[cfg(test)]
+impl Board<Neural<'static>> {
     pub fn new(pos: &Position) -> Self {
         Self::with_model(pos, Network::embedded())
     }
 }
 
-impl<'net> Board<'net> {
+impl<'net> Board<Neural<'net>> {
     pub fn with_model(pos: &Position, model: &'net Network) -> Self {
+        Self::with_residual(pos, Neural::new(model))
+    }
+}
+
+impl Board<Handwritten> {
+    pub fn handwritten(pos: &Position) -> Self {
+        Self::with_residual(pos, Handwritten)
+    }
+}
+
+impl<R: Residual> Board<R> {
+    pub fn with_residual(pos: &Position, net: R) -> Self {
         let mut view = Position::empty();
         view.board = pos.board;
         view.side_to_move = pos.side_to_move;
@@ -106,9 +171,8 @@ impl<'net> Board<'net> {
             mg: [0; 2],
             eg: [0; 2],
             phase: 0,
-            net: Accumulator::new(model),
+            net,
             material: [0; 2],
-            model,
         };
         for sq in 0..64 {
             let p = b.pos.board[sq];
@@ -120,7 +184,7 @@ impl<'net> Board<'net> {
                 b.mg[c] += mg;
                 b.eg[c] += eg;
                 b.phase += PHASE[p.piece_type as usize];
-                b.net.update(p, sq as u8, 1, b.model);
+                b.net.update(p, sq as u8, 1);
                 b.material[c] += super::eval::VALUE[p.piece_type as usize];
             }
         }
@@ -445,7 +509,7 @@ impl<'net> Board<'net> {
         }
     }
 
-    pub fn make(&mut self, a: &Action) -> Snapshot {
+    pub fn make(&mut self, a: &Action) -> Snapshot<R::Undo> {
         let p = &mut self.pos;
         let old = Snapshot {
             board: p.board,
@@ -460,7 +524,7 @@ impl<'net> Board<'net> {
             mg: self.mg,
             eg: self.eg,
             phase: self.phase,
-            net: self.net,
+            net: self.net.snapshot(),
             material: self.material,
         };
         let m = a.mv;
@@ -543,7 +607,7 @@ impl<'net> Board<'net> {
                 self.mg[c] -= mg;
                 self.eg[c] -= eg;
                 self.phase -= PHASE[pt];
-                self.net.update(before, sq as u8, -1, self.model);
+                self.net.update(before, sq as u8, -1);
                 self.material[c] -= super::eval::VALUE[pt];
             }
             if !after.is_empty() {
@@ -556,7 +620,7 @@ impl<'net> Board<'net> {
                 self.mg[c] += mg;
                 self.eg[c] += eg;
                 self.phase += PHASE[pt];
-                self.net.update(after, sq as u8, 1, self.model);
+                self.net.update(after, sq as u8, 1);
                 self.material[c] += super::eval::VALUE[pt];
                 if after.piece_type == PieceType::King {
                     p.king_sq[c] = sq as u8;
@@ -570,7 +634,7 @@ impl<'net> Board<'net> {
         old
     }
 
-    pub fn unmake(&mut self, s: Snapshot) {
+    pub fn unmake(&mut self, s: Snapshot<R::Undo>) {
         self.pos.board = s.board;
         self.pos.king_sq = s.kings;
         self.pos.zobrist = s.key;
@@ -584,7 +648,7 @@ impl<'net> Board<'net> {
         self.mg = s.mg;
         self.eg = s.eg;
         self.phase = s.phase;
-        self.net = s.net;
+        self.net.restore(s.net);
         self.material = s.material;
     }
 }

@@ -70,6 +70,10 @@ pub const ENGINE_REGISTRY: &[EngineEntry] = &[
         name: "waypoint",
         create: cataclysm::create_experiment::<8>,
     },
+    EngineEntry {
+        name: "granite",
+        create: cataclysm::create_experiment::<9>,
+    },
 ];
 
 pub fn find_engine(name: &str) -> Option<&'static EngineEntry> {
@@ -93,7 +97,7 @@ pub fn info(name: &str) -> Option<EngineInfo<'static>> {
             name: p.name,
             lineage: "cataclysm",
             hypothesis: p.hypothesis,
-            neural_accumulator: true,
+            neural_accumulator: p.neural_accumulator,
             neural_evaluation: p.neural_scale != 0,
         })
     } else {

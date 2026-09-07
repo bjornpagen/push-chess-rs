@@ -1085,6 +1085,48 @@ mod tests {
     }
 
     #[test]
+    fn granite_tournament_records_neural_absence_without_changing_abacus() {
+        let (_dir, mut corpus) = create();
+        let mut config = config();
+        config.engines = vec!["abacus".into(), "granite".into()];
+        let run = super::super::generate(
+            &mut corpus,
+            &config,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(corpus.verify(run).unwrap()["verified_games"], 2);
+        let w = work().unwrap();
+        {
+            let snapshot = corpus.db.snapshot(&w).unwrap();
+            let frame = snapshot.frame(&w);
+            for slot in 0..2 {
+                let entrant = frame
+                    .get(EntrantByRunSlot {
+                        run: RunId(run),
+                        slot,
+                    })
+                    .unwrap()
+                    .unwrap();
+                let engine = frame
+                    .get(EngineById { id: entrant.engine })
+                    .unwrap()
+                    .unwrap();
+                let network = frame
+                    .get(EngineNetworkByEngine {
+                        engine: entrant.engine,
+                    })
+                    .unwrap();
+                assert_eq!(engine.neural_accumulator, slot == 0);
+                assert!(!engine.neural_evaluation);
+                assert_eq!(network.is_some(), slot == 0);
+                assert_eq!(engine.name, config.engines[slot as usize]);
+            }
+        }
+        corpus.close().unwrap();
+    }
+
+    #[test]
     fn candidate_tournament_records_actual_identity_and_rejects_name_reuse() {
         use super::super::{Candidate, generate_controlled};
         let (_dir, mut corpus) = create();

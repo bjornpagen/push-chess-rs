@@ -88,3 +88,10 @@ bytes have the export digest above. Live progress must come from
 `lab status --db data/corpus --run 4` through the owning process; never reopen
 the live store in Python. The disposable log is `data/arena-r2.log`. Audit after
 the owner exits and inspect the sealed report before choosing any follow-up.
+
+Updated authorization, 2026-09-07: let Run 4 finish, then do not launch any
+further tournament, arena or smoke round. Audit and analyze these existing
+results, improve code and refine bounded candidates from eligible corpus runs,
+but leave any new candidate's playing strength unproven until the user explicitly
+reauthorizes games. The earlier replication/deeper-arena plan is not permission
+to run it now.

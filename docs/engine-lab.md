@@ -10,6 +10,7 @@ inside search. None of the new hypotheses is claimed to be stronger yet.
 |---|---|---|
 | cataclysm | Cataclysm | Control: prepared push transactions, NNUE and mate proof |
 | abacus | Cataclysm | Neural score off; accumulator still maintained (ablation only) |
+| granite | Cataclysm | Abacus-equivalent search with no neural weights, updates or undo bytes |
 | resonance | Cataclysm | Double neural score contribution |
 | perimeter | Cataclysm | Mobility, king-ring pressure and exposed material |
 | convoy | Cataclysm | Pawn corridors and push support |
@@ -27,7 +28,8 @@ inside search. None of the new hypotheses is claimed to be stronger yet.
 
 All seven Astra-lineage engines load no network and maintain no accumulator.
 Compare their experimental features against Sentinel to isolate effects of
-its correctness guards. Abacus is deliberately not described as neural-free.
+its correctness guards. Granite is also neural-free; Abacus is deliberately
+not described that way and remains the unchanged mechanism control.
 
 Outcome-refined NNUE artifacts enter as separately named candidates using the
 unchanged Cataclysm control search and baseline. `--nnue NAME=PATH` may repeat;
@@ -56,8 +58,8 @@ capacity. Astra uses inline scored moves with safe overflow. There are no
 database locks or Python calls in search. Teacher generation needs no GPU.
 
 Each worker lazily retains one engine per entrant, warms each once, and resets
-search history/table at each game boundary. A full 16-engine, 12-worker pool
-uses 6 GiB for transposition tables, plus bounded search buffers and
+search history/table at each game boundary. A full 17-engine, 12-worker pool
+would use 6.375 GiB for transposition tables, plus bounded search buffers and
 database pages. The embedded network is shared once per process. There is one
 thread per selected worker; macOS places work across heterogeneous cores.
 Hard affinity, unsafe SIMD, custom allocators and speculative prefetching are
@@ -214,9 +216,11 @@ eight-hour cap and 50-GiB store cap. Actual throughput/quality must be measured;
 the number scheduled is not a promise that all games finish within that cap.
 No automatic engine promotion or neural training occurs.
 
-The current registry adds Waypoint for future arenas; `--engines all` now means
-16 built-ins and 24,000 games at 100 pairs, before any supplied NNUE candidates.
-The already-running 15-entrant campaign is not expanded or restarted.
+The current registry includes Waypoint and Granite; `--engines all` now means
+17 built-ins and 27,200 games at 100 pairs, before any supplied NNUE candidates.
+Run 4 retains its fixed five-entrant roster. The user's 2026-09-07 instruction
+prohibits another tournament, including a smoke or arena round, after Run 4.
+The launch protocol above describes the interface, not current authorization.
 
 ## Waypoint: exact search-edge context
 
@@ -251,6 +255,42 @@ After the current store owner exits and its corpus is audited, compare
 `--engines cataclysm,waypoint --purpose arena` on fresh color-swapped families,
 then confirm at a deeper wall-time budget. Keep NNUE refinement as a separate
 candidate so its effect is not confounded with this ordering change.
+This earlier comparison plan is now paused: inspect the already-running Run 4,
+but do not launch another arena under the current authorization.
+
+## Granite: remove unused neural state
+
+Granite shares Abacus's evaluation, pruning, ordering, mate proof and table
+policy. It changes representation only. `Board<R>` has a compile-time residual
+policy: neural profiles retain the existing network/accumulator kernel, whereas
+Granite uses a zero-sized handwritten policy. Its undo payload is `()`, not an
+accumulator or a copied model reference. No per-node enum or virtual dispatch
+selects between these policies. Granite owns no model; supplying one violates
+the profile invariant rather than silently selecting another evaluator.
+
+On this Apple M2 Max target, board size falls from 600 to 336 bytes; move undo
+size falls from 560 to 304 bytes. Transposition tables and the main position
+representation are unchanged. The learning feature loader also uses the same
+handwritten board baseline, avoiding neural accumulation that it never consumed.
+It still emits exactly the existing feature IDs and deployed baseline scores.
+
+Abacus retains its accumulator and network identity. Granite reports neither;
+Rust and Python search interfaces and bumbledb engine/network relations test
+this distinction. No database schema changes or alternate game stores are needed.
+
+Verification on 2026-09-07: 114 Rust tests and 50 Python tests pass, both Clippy
+gates and formatting are clean, and all previous fixed-node fingerprints are
+unchanged. Granite matches Abacus's complete non-clock signature at 1, 257 and
+8,192-node limits, including repeated searches with retained table/history,
+special-move fixtures and reachable roots. Its 2,048-node all-profile fingerprint
+is also identical to Abacus (`18076246204620320795`). Handwritten and neural boards
+both pass reference-rule transition checks.
+
+The first bracketed whole-search comparison is too noisy to establish a speed
+gain; see [the measurements](search-cost.md#granite-neural-free-representation).
+Keep Granite as an isolated experimental candidate and repeat idle measurements
+after Run 4. Do not promote it, change controls, or launch games to test it under
+the current no-more-tournaments instruction.
 
 ## Audit search cost by entrant
 

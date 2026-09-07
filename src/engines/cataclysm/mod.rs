@@ -13,7 +13,7 @@ use crate::core::types::*;
 use crate::core::zobrist::zobrist_tables;
 use crate::engine::Engine;
 use crate::engine::shared::{Buckets, SearchLimits, pick_best};
-use board::{Action, Board, pack};
+use board::{Action, Board, Handwritten, Neural, Residual, pack};
 use eval::{VALUE, evaluate, piece_score};
 pub use network::Model;
 use network::Network;
@@ -94,7 +94,7 @@ pub type Cataclysm = Search<0>;
 
 pub struct Search<const V: usize> {
     name: Cow<'static, str>,
-    model: Model,
+    model: Option<Model>,
     table: Buckets<Entry, 4>,
     age: u8,
     history: Vec<i32>,
@@ -120,13 +120,31 @@ impl<const V: usize> Search<V> {
 
     /// Fixed choices bound worker memory; one table is retained for the game.
     pub fn with_hash_size(size: HashSize) -> Self {
-        Self::with_model(experiments::PROFILES[V].name, size, Model::embedded())
+        let profile = experiments::PROFILES[V];
+        Self::with_optional_model(
+            profile.name,
+            size,
+            profile.neural_accumulator.then(Model::embedded),
+        )
     }
 
     /// Model ownership is fixed for this search's lifetime. Its TT and history
     /// can never contain results from a previous candidate's evaluation.
     pub fn with_model(name: impl Into<Cow<'static, str>>, size: HashSize, model: Model) -> Self {
+        Self::with_optional_model(name, size, Some(model))
+    }
+
+    fn with_optional_model(
+        name: impl Into<Cow<'static, str>>,
+        size: HashSize,
+        model: Option<Model>,
+    ) -> Self {
         assert!(V < experiments::PROFILES.len(), "unknown Cataclysm profile");
+        assert_eq!(
+            model.is_some(),
+            experiments::PROFILES[V].neural_accumulator,
+            "model ownership must match the profile; no evaluator fallback"
+        );
         Self {
             name: name.into(),
             model,
@@ -149,8 +167,8 @@ impl<const V: usize> Search<V> {
         }
     }
 
-    pub fn model_fingerprint(&self) -> u64 {
-        self.model.fingerprint()
+    pub fn model_fingerprint(&self) -> Option<u64> {
+        self.model.as_ref().map(Model::fingerprint)
     }
 
     fn tick(&mut self, ply: usize) -> bool {
@@ -199,7 +217,7 @@ impl<const V: usize> Search<V> {
         };
     }
 
-    fn draw(&self, b: &Board, ply: usize) -> bool {
+    fn draw(&self, b: &Board<impl Residual>, ply: usize) -> bool {
         if b.pos.halfmove_clock >= 100 {
             return true;
         }
@@ -214,7 +232,12 @@ impl<const V: usize> Search<V> {
             == needed
     }
 
-    fn terminal_draw(&mut self, b: &mut Board, ply: usize, check: bool) -> Option<i32> {
+    fn terminal_draw(
+        &mut self,
+        b: &mut Board<impl Residual>,
+        ply: usize,
+        check: bool,
+    ) -> Option<i32> {
         if !self.draw(b, ply) {
             return None;
         }
@@ -237,12 +260,12 @@ impl<const V: usize> Search<V> {
         Some(if legal { 0 } else { -MATE + ply as i32 })
     }
 
-    fn hi(b: &Board, m: Move) -> usize {
+    fn hi(b: &Board<impl Residual>, m: Move) -> usize {
         ((b.pos.side_to_move as usize * 3 + m.path_kind as usize) * 64 + m.from as usize) * 64
             + m.to as usize
     }
 
-    fn action_context(b: &Board, mv: Move) -> usize {
+    fn action_context(b: &Board<impl Residual>, mv: Move) -> usize {
         (b.pos.side_to_move as usize * 7 + b.pos.board[mv.from as usize].piece_type as usize) * 64
             + mv.to as usize
     }
@@ -257,7 +280,7 @@ impl<const V: usize> Search<V> {
         (!experiments::PROFILES[V].exact_context || index != 0).then_some(index)
     }
 
-    fn prepare(&mut self, b: &Board, ply: usize, tt: u32) -> Vec<Action> {
+    fn prepare(&mut self, b: &Board<impl Residual>, ply: usize, tt: u32) -> Vec<Action> {
         let mut actions = std::mem::take(&mut self.buffers[ply]);
         b.generate(&mut actions);
         let counter = self.parent_context(ply).map(|parent| self.counters[parent]);
@@ -320,7 +343,7 @@ impl<const V: usize> Search<V> {
 
     fn search(
         &mut self,
-        b: &mut Board,
+        b: &mut Board<impl Residual>,
         mut depth: i32,
         mut alpha: i32,
         mut beta: i32,
@@ -550,7 +573,7 @@ impl<const V: usize> Search<V> {
 
     fn qsearch(
         &mut self,
-        b: &mut Board,
+        b: &mut Board<impl Residual>,
         mut alpha: i32,
         beta: i32,
         ply: usize,
@@ -697,6 +720,25 @@ impl<const V: usize> Engine for Search<V> {
     }
     fn choose_move(&mut self, pos: &mut Position, budget: &SearchBudget) -> (Move, SearchStats) {
         self.limits.begin(budget, 94);
+        // Const specialization instantiates only the profile's board layout.
+        // Clone one shared owner per neural root, never per recursive node.
+        // A missing required network is an invariant failure, not a fallback.
+        if experiments::PROFILES[V].neural_accumulator {
+            let model = self.model.as_ref().expect("required neural model").clone();
+            self.choose_with_residual(pos, budget, Neural::new(model.network()))
+        } else {
+            self.choose_with_residual(pos, budget, Handwritten)
+        }
+    }
+}
+
+impl<const V: usize> Search<V> {
+    fn choose_with_residual(
+        &mut self,
+        pos: &mut Position,
+        budget: &SearchBudget,
+        residual: impl Residual,
+    ) -> (Move, SearchStats) {
         self.qnodes = 0;
         self.hits = 0;
         self.age = self.age.wrapping_add(4) & 252;
@@ -717,10 +759,7 @@ impl<const V: usize> Engine for Search<V> {
                 },
             );
         };
-        // One shared-owner clone per root, never per node. The board borrows
-        // weights locally so recursive mutable search does not borrow self.
-        let model = self.model.clone();
-        let mut board = Board::with_model(pos, model.network());
+        let mut board = Board::with_residual(pos, residual);
         let proof_cap = if budget.max_depth > 0 {
             budget.max_depth
         } else {
@@ -785,7 +824,7 @@ impl<const V: usize> Engine for Search<V> {
             }
         }
         let mut pv = vec![best];
-        let mut view = Board::with_model(pos, model.network());
+        let mut view = Board::with_residual(pos, residual);
         let mut actions = Vec::new();
         let mut id = pack(best);
         let mut seen = Vec::new();
@@ -852,7 +891,14 @@ pub fn verify_rules(pos: &Position) -> Result<usize, String> {
 }
 
 pub fn verify_rules_with_model(pos: &Position, model: &Model) -> Result<usize, String> {
-    let mut board = Board::with_model(pos, model.network());
+    verify_board(pos, Neural::new(model.network()))
+}
+
+fn verify_board<R: Residual>(pos: &Position, residual: R) -> Result<usize, String>
+where
+    R::Undo: PartialEq,
+{
+    let mut board = Board::with_residual(pos, residual);
     let mut actions = Vec::new();
     board.generate(&mut actions);
     let mut core = Vec::new();
@@ -883,13 +929,13 @@ pub fn verify_rules_with_model(pos: &Position, model: &Model) -> Result<usize, S
                 return Err(format!("check mismatch {:?}: {}", action.mv, pos.to_fen()));
             }
         }
-        let rebuilt = Board::with_model(&reference, model.network());
+        let rebuilt = Board::with_residual(&reference, residual);
         if board.men != rebuilt.men
             || board.occupied != rebuilt.occupied
             || board.mg != rebuilt.mg
             || board.eg != rebuilt.eg
             || board.phase != rebuilt.phase
-            || board.net != rebuilt.net
+            || board.net.snapshot() != rebuilt.net.snapshot()
             || board.material != rebuilt.material
         {
             return Err("incremental feature mismatch".into());
@@ -925,6 +971,7 @@ mod tests {
             let mut random = seed;
             for _ in 0..80 {
                 verify_rules(&pos).unwrap();
+                verify_board(&pos, Handwritten).unwrap();
                 let mut legal = Vec::new();
                 generate_legal_moves(&mut pos, &mut legal);
                 if legal.is_empty() {
@@ -947,6 +994,109 @@ mod tests {
             let mut pos = Position::empty();
             pos.set_from_fen(fen);
             verify_rules(&pos).unwrap();
+            verify_board(&pos, Handwritten).unwrap();
+        }
+    }
+
+    #[test]
+    fn granite_has_no_neural_state_or_weight_owner() {
+        use board::Snapshot;
+        use network::Accumulator;
+        assert_eq!(std::mem::size_of::<Handwritten>(), 0);
+        assert_eq!(std::mem::size_of::<<Handwritten as Residual>::Undo>(), 0);
+        assert_eq!(std::mem::size_of::<Accumulator>(), 256);
+        assert_eq!(
+            std::mem::size_of::<Snapshot<Accumulator>>(),
+            std::mem::size_of::<Snapshot<()>>() + 256
+        );
+        let granite = Search::<9>::with_hash_size(HashSize::MiB4);
+        assert!(granite.model.is_none());
+        assert_eq!(granite.model_fingerprint(), None);
+        let info = crate::engines::info(granite.name()).unwrap();
+        assert!(!info.neural_accumulator && !info.neural_evaluation);
+        let abacus = Search::<1>::with_hash_size(HashSize::MiB4);
+        assert!(abacus.model.is_some());
+        assert!(
+            crate::engines::info(abacus.name())
+                .unwrap()
+                .neural_accumulator
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                Search::<9>::with_model("invalid-neural-granite", HashSize::MiB4, Model::embedded())
+            })
+            .is_err()
+        );
+        eprintln!(
+            "GRANITE_LAYOUT neural_board={} handwritten_board={} neural_undo={} handwritten_undo={}",
+            std::mem::size_of::<Board>(),
+            std::mem::size_of::<Board<Handwritten>>(),
+            std::mem::size_of::<Snapshot<Accumulator>>(),
+            std::mem::size_of::<Snapshot<()>>()
+        );
+    }
+
+    #[test]
+    fn granite_matches_abacus_at_tiny_and_full_budgets_with_retained_history() {
+        let mut positions: Vec<_> = [
+            "8/7k/4RB2/8/4N3/8/8/K7 w - - 0 1",
+            "7k/P7/R7/8/8/8/8/K7 w - - 0 1",
+            "r3k2r/8/8/3pP3/8/8/8/R3K2R w KQkq d6 0 1",
+            "7k/8/8/8/3p4/8/4P3/K7 b - - 0 1",
+        ]
+        .map(|fen| Position::try_from_fen(fen).unwrap())
+        .into();
+        let mut state = crate::selfplay::State::default();
+        for ply in 0..48 {
+            if state.white_value().is_some() {
+                state = crate::selfplay::State::default();
+            }
+            if ply % 8 == 0 {
+                positions.push(state.position().clone());
+            }
+            let legal = state.legal_moves();
+            state
+                .play(legal[(ply * 29 + 5) % legal.len()].id())
+                .unwrap();
+        }
+        let mut abacus = Search::<1>::with_hash_size(HashSize::MiB4);
+        let mut granite = Search::<9>::with_hash_size(HashSize::MiB4);
+        for (root, pos) in positions.iter().enumerate() {
+            for nodes in [1, 257, 8192] {
+                abacus.new_game(pos.side_to_move, root as u64);
+                granite.new_game(pos.side_to_move, root as u64);
+                // The second call retains both transposition and history state.
+                for _ in 0..2 {
+                    let observe = |engine: &mut dyn Engine| {
+                        let mut copy = pos.clone();
+                        let (mv, stats) = engine.choose_move(
+                            &mut copy,
+                            &SearchBudget {
+                                max_nodes: nodes,
+                                ..SearchBudget::default()
+                            },
+                        );
+                        assert_eq!(copy.to_fen(), pos.to_fen());
+                        assert_eq!(copy.zobrist, pos.zobrist);
+                        assert_eq!(copy.undo_stack.len(), pos.undo_stack.len());
+                        assert!(stats.nodes <= nodes as u64);
+                        (
+                            mv,
+                            stats.nodes,
+                            stats.depth_reached,
+                            stats.seldepth,
+                            stats.eval_cp,
+                            stats.diagnostics,
+                            stats.pv,
+                        )
+                    };
+                    assert_eq!(
+                        observe(&mut abacus),
+                        observe(&mut granite),
+                        "root={root} nodes={nodes}"
+                    );
+                }
+            }
         }
     }
 
@@ -1148,7 +1298,10 @@ mod tests {
         );
         assert_eq!(stats.eval_cp, expected.evaluate(&pos));
         assert_eq!(stats.depth_reached, 0);
-        assert_eq!(Network::embedded().fingerprint, control.model_fingerprint());
+        assert_eq!(
+            Some(Network::embedded().fingerprint),
+            control.model_fingerprint()
+        );
         for fen in [
             "8/7k/4RB2/8/4N3/8/8/K7 w - - 0 1",
             "7k/P7/R7/8/8/8/8/K7 w - - 0 1",

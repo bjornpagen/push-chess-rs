@@ -1,6 +1,6 @@
 //! Immutable, independently testable hypotheses. Const specialization keeps
 //! experimental evaluation/search branches out of the control's hot path.
-use super::board::{Action, Board, DIRS, KNIGHTS, step};
+use super::board::{Action, Board, DIRS, KNIGHTS, Residual, step};
 use super::eval::piece_score;
 use crate::core::types::*;
 
@@ -9,6 +9,7 @@ pub struct Profile {
     pub name: &'static str,
     pub hypothesis: &'static str,
     pub neural_scale: i32,
+    pub neural_accumulator: bool,
     pub geometry: bool,
     pub logistics: bool,
     pub ordering: bool,
@@ -20,6 +21,7 @@ const CONTROL: Profile = Profile {
     name: "cataclysm",
     hypothesis: "Unchanged evaluation/search policy; shared scratch-buffer refactors only",
     neural_scale: 1,
+    neural_accumulator: true,
     geometry: false,
     logistics: false,
     ordering: false,
@@ -27,7 +29,7 @@ const CONTROL: Profile = Profile {
     exact_context: false,
 };
 
-pub const PROFILES: [Profile; 9] = [
+pub const PROFILES: [Profile; 10] = [
     CONTROL,
     Profile {
         name: "abacus",
@@ -80,11 +82,18 @@ pub const PROFILES: [Profile; 9] = [
         exact_context: true,
         ..CONTROL
     },
+    Profile {
+        name: "granite",
+        hypothesis: "Abacus decisions with no neural weights, updates or accumulator snapshots",
+        neural_scale: 0,
+        neural_accumulator: false,
+        ..CONTROL
+    },
 ];
 
 /// Geometric influence, not a legal-move proof. In particular knight routes
 /// may be blocked in Push Chess; legal search remains the tactical authority.
-fn influence(b: &Board, color: usize) -> (u64, u64, i32) {
+fn influence(b: &Board<impl Residual>, color: usize) -> (u64, u64, i32) {
     let mut all = 0u64;
     let mut twice = 0u64;
     let mut mobility = 0;
@@ -134,7 +143,7 @@ fn influence(b: &Board, color: usize) -> (u64, u64, i32) {
     (all, twice, mobility)
 }
 
-pub(super) fn geometry(b: &Board) -> i32 {
+pub(super) fn geometry(b: &Board<impl Residual>) -> i32 {
     let maps = [influence(b, 0), influence(b, 1)];
     let mut score = 0;
     for c in 0..2 {
@@ -157,7 +166,7 @@ pub(super) fn geometry(b: &Board) -> i32 {
     score
 }
 
-pub(super) fn logistics(b: &Board) -> i32 {
+pub(super) fn logistics(b: &Board<impl Residual>) -> i32 {
     let mut score = 0;
     for c in 0..2 {
         let dr = if c == 0 { 1 } else { -1 };
@@ -197,7 +206,7 @@ pub(super) fn logistics(b: &Board) -> i32 {
     score
 }
 
-pub(super) fn transaction_gain(b: &Board, a: &Action) -> i32 {
+pub(super) fn transaction_gain(b: &Board<impl Residual>, a: &Action) -> i32 {
     let phase = b.phase.min(24);
     a.plan.as_ref().map_or(0, |plan| {
         plan.displacements()
@@ -229,7 +238,7 @@ pub(super) fn transaction_gain(b: &Board, a: &Action) -> i32 {
     })
 }
 
-pub(super) fn volatile_push(b: &Board, a: &Action) -> bool {
+pub(super) fn volatile_push(b: &Board<impl Residual>, a: &Action) -> bool {
     a.king_push
         || (a.push
             && a.plan.as_ref().is_some_and(|plan| {

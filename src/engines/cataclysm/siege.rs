@@ -1,7 +1,7 @@
 //! A separate AND/OR proof search for forcing checks. The attacking side may
 //! choose any checking move; EVERY legal defender reply must be refuted.
 //! A failed or interrupted proof says nothing about the position's value.
-use super::{Board, MAX, Search};
+use super::{Board, MAX, Residual, Search};
 use crate::core::types::*;
 
 struct Limits {
@@ -11,7 +11,11 @@ struct Limits {
 }
 
 impl<const V: usize> Search<V> {
-    pub(super) fn siege(&mut self, b: &mut Board, max_depth: i32) -> Option<Vec<Move>> {
+    pub(super) fn siege(
+        &mut self,
+        b: &mut Board<impl Residual>,
+        max_depth: i32,
+    ) -> Option<Vec<Move>> {
         let limits = Limits {
             attacker: b.pos.side_to_move,
             deadline: if self.limits.micros == 0 {
@@ -40,7 +44,7 @@ impl<const V: usize> Search<V> {
 
     fn prove(
         &mut self,
-        b: &mut Board,
+        b: &mut Board<impl Residual>,
         depth: i32,
         ply: usize,
         limits: &Limits,
