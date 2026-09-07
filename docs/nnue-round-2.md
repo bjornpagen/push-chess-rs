@@ -73,3 +73,10 @@ stop early on a favorable score or automatically promote the selected engine.
 Modest gaps can still remain inconclusive with 500 families, especially after
 accounting for ten matchups. A promising selection needs a fresh replication
 and deeper-budget confirmation before the next production corpus generation.
+
+The smoke completed as Run 3: all 20 games terminal, 1,280 moves, 1,160 analyses,
+and a successful full replay audit (no castling warnings). All ten matchups
+have both colors and no missing/unknown outcomes. Twelve workers were requested;
+the runner capped this tiny workload at its ten available opening pairs. The
+larger arena has enough pairs to use all twelve. No strength conclusion is
+drawn from this one-pair smoke test.
