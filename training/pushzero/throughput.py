@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import numpy as np
+from tinygrad.helpers import GlobalCounters
 from .learning import load_checkpoint, resolve_checkpoint
 from .inference import Predictor
 from .selfplay import RollingCollector
@@ -24,9 +25,12 @@ class DeviceSampler:
         try:
             while not self.stop.is_set():
                 registry = plistlib.loads(subprocess.check_output(["/usr/sbin/ioreg", "-a", "-r", "-c", "AGXAccelerator"]))
-                gpu = registry[0]["PerformanceStatistics"]["Device Utilization %"]
+                stats = registry[0]["PerformanceStatistics"]
+                gpu = stats["Device Utilization %"]
                 rss = int(subprocess.check_output(["/bin/ps", "-p", str(os.getpid()), "-o", "rss="])) * 1024
-                self.rows.append({"time": time.monotonic(), "gpu_percent": gpu, "rss_bytes": rss})
+                self.rows.append({"time": time.monotonic(), "gpu_percent": gpu, "rss_bytes": rss,
+                                  "tinygrad_live_buffer_bytes": GlobalCounters.mem_used,
+                                  "system_gpu_in_use_bytes": stats["In use system memory"]})
                 self.stop.wait(1)
         except Exception as error:
             self.error = error
@@ -79,6 +83,8 @@ def sweep(checkpoint, settings, *, repeats=2, seconds=15., warmup=10., workers=2
                     "mean_useful_device_batch": delta["evaluated_rows"] / max(1, delta["device_batches"]),
                     "whole_gpu_mean_percent": float(np.mean([r["gpu_percent"] for r in device.rows])),
                     "rss_peak_bytes": max(r["rss_bytes"] for r in device.rows),
+                    "tinygrad_live_buffer_bytes_peak": max(r["tinygrad_live_buffer_bytes"] for r in device.rows),
+                    "system_gpu_in_use_bytes_peak": max(r["system_gpu_in_use_bytes"] for r in device.rows),
                     "device_samples": device.rows, "native": p.last_search_metrics,
                     "selfplay": c.statistics(), "terminal_games": sum(g["white_outcome"] is not None for g in games)}
                 measurements.append(row)
@@ -88,5 +94,6 @@ def sweep(checkpoint, settings, *, repeats=2, seconds=15., warmup=10., workers=2
         "machine": platform.platform(), "workers": workers, "search_group_size": group_size,
         "measurements": measurements, "limitations": "Frozen network, no learning. Seeded mixed starts; scheduling changes RNG order. "
         "Same search budgets; 64-ply benchmark cap. Cold warm-up reported separately, later new-shape compilations remain in counters. "
-        "GPU counters are system-wide, not training-only FLOPS. RSS includes retained runtime/allocator memory from earlier arms. "
+        "GPU counters are system-wide, not training-only FLOPS. RSS is not GPU memory. Tinygrad's live buffer count excludes cached free allocations. "
+        "RSS includes retained runtime/allocator memory from earlier arms. "
         "Confirm selected settings in isolated processes and in real training; no playing-strength claim."}

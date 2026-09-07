@@ -8,6 +8,7 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from pushzero import State
 from pushzero import run
 from pushzero.replay import Sample
@@ -78,3 +79,15 @@ def test_interrupted_updates_resume_before_new_games(tmp_path, monkeypatch):
     assert calls == ["update", "update", "collect", "update", "update", "update"]
     assert resumed["steps"] == 6 and resumed["pending_updates"] == 0
     assert resumed["iteration"] == 2
+
+
+def test_resume_overrides_are_explicit_and_systems_only(tmp_path, monkeypatch):
+    from pushzero.cli import main
+    with pytest.raises(ValueError, match="systems"):
+        run.train(tmp_path, resume=True, system_overrides={"channels": 8})
+    captured = []
+    monkeypatch.setattr(run, "train", lambda *args, **kwargs: captured.append(kwargs))
+    main(["train", "--run", str(tmp_path), "--resume", "--inference-batch-size", "8", "--search-group-size", "4"])
+    assert captured[-1]["system_overrides"] == {"inference_batch_size": 8, "search_group_size": 4}
+    main(["train", "--run", str(tmp_path), "--resume", "--no-fast-explore"])
+    assert captured[-1]["system_overrides"] == {"fast_explore": False}
