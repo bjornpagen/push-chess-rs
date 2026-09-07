@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn candidate_network_is_fixed_shared_and_used_by_real_search() {
-        let model = Model::decode(learning::CONTROL_BYTES).unwrap();
+        let model = Model::decode(Model::CONTROL_BYTES).unwrap();
         let other = model.clone();
         assert!(std::ptr::eq(model.network(), other.network()));
         let mut control = Cataclysm::with_hash_size(HashSize::MiB4);
@@ -959,7 +959,7 @@ mod tests {
         }
         let zero = vec![0; Model::BYTES];
         let zero_model = Model::decode(&zero).unwrap();
-        let expected = learning::Evaluator::decode(&zero).unwrap();
+        let expected = Model::decode(&zero).unwrap();
         let mut different =
             Cataclysm::with_model("zero-fixture", HashSize::MiB4, zero_model.clone());
         assert_ne!(different.model_fingerprint(), control.model_fingerprint());

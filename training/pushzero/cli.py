@@ -48,18 +48,24 @@ def main(argv=None):
     for name, default in (("steps",1000),("batch-size",128),("capacity",100000),("max-games",10000),
                           ("channels",64),("blocks",4),("seed",1)):
         training.add_argument("--"+name, type=int, default=default)
-    residual = sub.add_parser("nnue", help="refine the small Cataclysm residual using terminal bumbledb outcomes")
+    residual_group = sub.add_parser("nnue", help="single entry point for small-NNUE training, export and measurement")
+    residual_commands = residual_group.add_subparsers(dest="nnue_command", required=True)
+    residual = residual_commands.add_parser("train", help="refine from terminal bumbledb outcomes")
     residual.add_argument("--db", type=Path, required=True)
     residual.add_argument("--runs", nargs="+", type=int, required=True, help="explicit sealed source run IDs")
     residual.add_argument("--output", type=Path, required=True, help="new candidate checkpoint, never the engine control")
     residual.add_argument("--resume", type=Path)
     residual.add_argument("--no-jit", action="store_true")
+    residual.add_argument("--device", choices=("CPU","METAL"), help="explicit training backend; default is DEV (normally METAL)")
     for name, default in (("steps",1000),("batch-size",256),("max-games",10000),
                           ("validation-games",2000),("positions-per-game",16),("seed",1)):
         residual.add_argument("--"+name, type=int, default=default)
-    exporter = sub.add_parser("nnue-export", help="export a candidate's exact i16 engine network; does not install it")
+    exporter = residual_commands.add_parser("export", help="export exact i16 weights; does not install them")
     exporter.add_argument("checkpoint", type=Path)
     exporter.add_argument("--output", type=Path, required=True)
+    residual_bench = residual_commands.add_parser("benchmark", help="compare NNUE backends on the same inputs; no corpus or saved training")
+    residual_bench.add_argument("--batches", nargs="+", type=int, default=[1,32,256,1024])
+    residual_bench.add_argument("--repeats", type=int, default=15)
     analysis = sub.add_parser("analyse", help="choose a legal move with a saved model")
     analysis.add_argument("checkpoint", type=Path, help="checkpoint file or run directory")
     analysis.add_argument("--fen")
@@ -68,13 +74,18 @@ def main(argv=None):
     if Device.DEFAULT != "METAL" and not (args.allow_cpu and Device.DEFAULT == "CPU"):
         parser.error(f"expected METAL, got {Device.DEFAULT}; CPU diagnostics require DEV=CPU and --allow-cpu")
     if args.command == "nnue":
-        from .nnue import train
-        print(json.dumps(train(args.db,args.output,runs=args.runs,steps=args.steps,batch_size=args.batch_size,
-            max_games=args.max_games,validation_games=args.validation_games,positions_per_game=args.positions_per_game,
-            seed=args.seed,resume=args.resume,jit=not args.no_jit),indent=2))
-    elif args.command == "nnue-export":
-        from .nnue import export
-        print(json.dumps(export(args.checkpoint,args.output),indent=2))
+        if args.nnue_command == "train":
+            from .nnue import train
+            result = train(args.db,args.output,runs=args.runs,steps=args.steps,batch_size=args.batch_size,
+                max_games=args.max_games,validation_games=args.validation_games,positions_per_game=args.positions_per_game,
+                seed=args.seed,resume=args.resume,jit=not args.no_jit,device=args.device)
+        elif args.nnue_command == "export":
+            from .nnue import export
+            result = export(args.checkpoint,args.output)
+        else:
+            from .nnue_benchmark import compare
+            result = compare(args.batches, args.repeats)
+        print(json.dumps(result, indent=2))
     elif args.command == "pretrain":
         from .pretrain import train
         print(json.dumps(train(args.db,args.output,steps=args.steps,batch_size=args.batch_size,

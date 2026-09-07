@@ -49,9 +49,9 @@ handwritten evaluation and search left intact. It is not a policy network.
 After the tournament has stopped and the corpus has passed `lab verify`:
 
 ```sh
-uv run pushzero nnue --db data/corpus --runs 2 \
+uv run pushzero nnue train --db data/corpus --runs 2 \
   --output models/residual-r2.safetensors --steps 1000 --batch-size 256
-uv run pushzero nnue-export models/residual-r2.safetensors \
+uv run pushzero nnue export models/residual-r2.safetensors \
   --output models/residual-r2.bin
 ```
 
@@ -71,6 +71,41 @@ The Rust boundary emits owned `[plies,2,64]` u16 feature IDs plus baseline and
 check-status arrays once per game page. Sparse replay costs 256 bytes/position
 for features. Only a sampled batch expands to dense float32 features for Metal
 matrix multiplication; no Python per-piece FFI loop is needed.
+
+`pushzero nnue` is the sole NNUE command entry point (`train`, `export`,
+`benchmark`); Python uses `pushzero.nnue.Model`. The deployed Rust model owns
+the format/dimensions, feature IDs, clipping/division constants and final score
+conversion. Python imports that contract, not a parallel constant set.
+Tinygrad provides differentiable forward/backward and optimizer updates.
+Frozen inference/validation calls the actual Rust search accumulator in
+whole batches; the learning-only Rust evaluator and production NumPy evaluator
+are removed. An independent integer oracle exists only in tests. Each
+validation pass freezes current weights once, so optimizer changes cannot
+leave a stale prediction cache. No per-node Python/GPU calls or backend fallback.
+Repeated inference can call `frozen = model.freeze()` once, followed by
+`frozen.scores(ids, baselines, sides)` with contiguous u16/i32/u8 arrays (at
+most 4096 rows per call). That object owns immutable weights, unaffected by
+later training; freeze again explicitly to adopt new weights. This avoids
+export, weight transfer and decoding on every prediction request.
+
+Choose backends by measured workload, not language. A bounded comparison is:
+
+```sh
+uv run pushzero nnue benchmark --batches 1 32 256 1024 --repeats 15
+```
+
+It compares native sparse inference with the same tinygrad forward on CPU and
+Metal, including host-input preparation and synchronized host scores. Separate
+resident-input timings bound the tensor-only case. It also times complete
+temporary QAT updates on both tinygrad devices. Inputs rotate, order alternates,
+JIT is warmed and inference parity is asserted. Nothing opens the corpus,
+persists games or saves trained weights. Active all-core tournaments contaminate
+absolute timings; repeat idle before acting on small differences. This measures
+full sparse rebuilds, not the cheaper changed-piece updates inside tree search.
+The [measured backend decision](../docs/nnue-backends.md) keeps native inference
+and Metal at the production batch sizes. Tiny batches favored CPU; select
+`nnue train --device CPU` explicitly when that matches the measured workload.
+`--device METAL` is also explicit; omission uses DEV (normally METAL).
 
 Quantization-aware forward arithmetic reproduces the deployed accumulator:
 shared color/rank-reflected features; integer feature sums; hidden clipping to

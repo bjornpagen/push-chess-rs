@@ -4,7 +4,7 @@ import hashlib
 import numpy as np
 import pytest
 from tinygrad import Context, Tensor
-from pushzero._native import State, nnue_control, nnue_inputs, nnue_evaluate
+from pushzero._native import State, NNUE_CONTROL, NNUE_SPEC, Nnue, nnue_inputs
 from pushzero import nnue
 
 
@@ -24,6 +24,20 @@ def metal_scores(model, ids, baseline, sides):
                      Tensor(sides.astype(np.float32))).numpy()
 
 
+def integer_reference(data, ids, baselines, sides):
+    """Independent test oracle, deliberately not a production evaluator.
+
+    Pin the format's constants independently so shared-spec mistakes still fail.
+    """
+    words = np.frombuffer(data, dtype="<i2").astype(np.int64)
+    table = np.concatenate((words[:768*32].reshape(768,32), np.zeros((1,32),np.int64)))
+    hidden = np.clip(table[ids].sum(axis=2) + words[768*32:769*32], 0, 256)
+    total = (hidden[:,0] - hidden[:,1]) @ words[769*32:]
+    residual = np.sign(total) * (np.abs(total) // 8192)
+    return np.clip((np.asarray(baselines,np.int64) + residual) * (1-2*np.asarray(sides,np.int64)) + 14,
+                   -28000,28000).astype(np.int32)
+
+
 def test_control_features_integer_reference_and_metal_are_exact():
     states = positions(96)
     ids, baseline = nnue_inputs(states)
@@ -38,14 +52,16 @@ def test_control_features_integer_reference_and_metal_are_exact():
         for perspective in row:
             real = perspective[perspective != 768]
             assert len(np.unique(real)) == len(real)
-    model = nnue.Residual()
-    assert model.export() == nnue_control()
-    scores = nnue_evaluate(nnue_control(), states)
-    np.testing.assert_array_equal(nnue.integer_scores(nnue_control(), ids, baseline, side), scores)
+    model = nnue.Model()
+    assert model.export() == NNUE_CONTROL
+    scores = Nnue(NNUE_CONTROL).positions(states)
+    np.testing.assert_array_equal(integer_reference(NNUE_CONTROL, ids, baseline, side), scores)
+    np.testing.assert_array_equal(model.scores(ids, baseline, side, batch_size=7), scores)
     np.testing.assert_array_equal(metal_scores(model, ids, baseline, side), scores)
     assert nnue_inputs([])[0].shape == (0, 2, 64)
-    assert nnue_evaluate(nnue_control(), []).shape == (0,)
-    with pytest.raises(ValueError): nnue_evaluate(b"bad", states)
+    assert Nnue(NNUE_CONTROL).positions([]).shape == (0,)
+    assert model.scores(*nnue_inputs([]), np.zeros(0)).shape == (0,)
+    with pytest.raises(ValueError): Nnue(b"bad")
     with pytest.raises(ValueError): nnue_inputs([states[0]] * 4097)
 
 
@@ -55,23 +71,89 @@ def test_full_i16_decoder_and_signed_division_agree_with_rust():
     side = np.array([state.turn() for state in states])
     rng = np.random.default_rng(33)
     data = rng.integers(-32768, 32768, (nnue.FEATURES+2)*nnue.WIDTH, dtype=np.int16).astype("<i2").tobytes()
-    np.testing.assert_array_equal(nnue.integer_scores(data, ids, baseline, side), nnue_evaluate(data, states))
-    with pytest.raises(ValueError, match="exact float32"): nnue.Residual(data)
+    native = Nnue(data)
+    expected = integer_reference(data, ids, baseline, side)
+    np.testing.assert_array_equal(expected, native.positions(states))
+    np.testing.assert_array_equal(expected, native.scores(ids, baseline, side.astype(np.uint8)))
+    with pytest.raises(ValueError, match="exact float32"): nnue.Model(data)
     with pytest.raises(ValueError): nnue.dense_features(np.full((1,2,64), 769, np.uint16))
     with pytest.raises(ValueError): nnue.dense_features(np.zeros((1,2,63), np.uint16))
+
+
+def test_single_spec_native_validation_and_snapshot_freshness():
+    assert NNUE_SPEC == {"format":"cataclysm-residual-v1", "bytes":49280, "features":768,
+        "width":32, "slots":64, "hidden_clip":256, "residual_divisor":8192, "tempo":14, "score_limit":28000}
+    model = nnue.Model()
+    states = positions(5)
+    ids, baseline = nnue_inputs(states)
+    sides = np.array([s.turn() for s in states],np.uint8)
+    before = model.scores(ids,baseline,sides)
+    frozen = model.freeze()
+    model.output.assign(Tensor(np.zeros(32,np.float32))).realize()
+    after = model.scores(ids,baseline,sides)
+    np.testing.assert_array_equal(after,Nnue(model.export()).positions(states))
+    assert np.any(before != after)
+    np.testing.assert_array_equal(before,frozen.scores(ids,baseline,sides))
+    native = Nnue(NNUE_CONTROL)
+    bad = ids.copy()
+    bad[0,0,0] = 769
+    with pytest.raises(ValueError): native.scores(bad,baseline,sides)
+    with pytest.raises(ValueError): model.scores(bad,baseline,sides)
+    bad[0,0,0] = bad[0,0,1]
+    with pytest.raises(ValueError,match="duplicate"): native.scores(bad,baseline,sides)
+    with pytest.raises(ValueError,match="duplicate"): model.scores(bad,baseline,sides)
+    for baselines in (np.full(5,2**31,dtype=np.int64),baseline.astype(float)+.5,np.full(5,np.nan)):
+        with pytest.raises(ValueError): model.scores(ids,baselines,sides)
+    with pytest.raises(ValueError): native.scores(ids,baseline,np.full(5,2,np.uint8))
+    with pytest.raises(ValueError): model.scores(ids,baseline,sides+2)
+    with pytest.raises(ValueError): model.scores(ids,baseline,sides,batch_size=0)
+    with pytest.raises(ValueError): native.scores(ids[:,:,:63],baseline,sides)
+
+
+def test_cpu_and_metal_training_use_the_same_complete_update():
+    states = positions(8)
+    ids,baseline = nnue_inputs(states)
+    sides = np.array([s.turn() for s in states],np.float32)
+    batch = (nnue.dense_features(ids),baseline.astype(np.float32),sides,np.linspace(0,1,8,dtype=np.float32))
+    learners = [nnue.Learner(nnue.Model(device=device)) for device in ("CPU","METAL")]
+    for _ in range(4):
+        a,b = [learner.train(batch) for learner in learners]
+        np.testing.assert_allclose(list(a.values()),list(b.values()),rtol=2e-5,atol=2e-6)
+        for key in nnue.SCALES:
+            np.testing.assert_allclose(getattr(learners[0].model,key).numpy(),getattr(learners[1].model,key).numpy(),rtol=2e-5,atol=2e-6)
+
+
+def test_checkpoint_restores_parameters_and_optimizer_on_selected_device(tmp_path):
+    source = nnue.Learner(nnue.Model(device="CPU"))
+    states = positions(4)
+    ids,baseline = nnue_inputs(states)
+    batch = (nnue.dense_features(ids),baseline.astype(np.float32),
+             np.array([s.turn() for s in states],np.float32),np.array([0,1,.5,0],np.float32))
+    source.train(batch)
+    path = tmp_path/"cross-device.safetensors"
+    nnue.save(path,source,{})
+    restored,_ = nnue.load(path,training=True,device="METAL")
+    assert restored.steps == source.steps and restored.model.export() == source.model.export()
+    a,b = nnue.optimizer_state(source.optimizer),nnue.optimizer_state(restored.optimizer)
+    for key in a:
+        assert b[key].device == "METAL"
+        np.testing.assert_array_equal(a[key].numpy(),b[key].numpy())
+    assert all(getattr(restored.model,key).device == "METAL" for key in nnue.SCALES)
 
 
 def test_half_integer_rounding_and_parameter_clipping_match_export():
     states = positions(12)
     ids, baseline = nnue_inputs(states)
     side = np.array([state.turn() for state in states])
-    model, rng = nnue.Residual(), np.random.default_rng(32)
+    model, rng = nnue.Model(), np.random.default_rng(32)
     for key, scale in nnue.SCALES.items():
         words = rng.integers(-120, 121, nnue.SHAPES[key]).astype(np.float32) + .5
         words.flat[:4] = [-40000.5, -2047.5, 2047.5, 40000.5]
         getattr(model, key).assign(Tensor(words / scale)).realize()
     data = model.export()
-    np.testing.assert_array_equal(metal_scores(model, ids, baseline, side), nnue_evaluate(data, states))
+    expected = Nnue(data).positions(states)
+    np.testing.assert_array_equal(metal_scores(model, ids, baseline, side), expected)
+    np.testing.assert_array_equal(model.scores(ids, baseline, side), expected)
     for key, scale in nnue.SCALES.items():
         limit = (-2047,2047) if key == "output" else (-32768,32767)
         expected = np.rint(np.clip(getattr(model,key).numpy()*scale, *limit))
@@ -80,9 +162,9 @@ def test_half_integer_rounding_and_parameter_clipping_match_export():
 
 def test_candidate_actual_search_isolated_identity_and_bounded_analysis():
     from pushzero._native import Opponent
-    with pytest.raises(ValueError, match="cannot replace"): Opponent("cataclysm", nnue_control())
+    with pytest.raises(ValueError, match="cannot replace"): Opponent("cataclysm", NNUE_CONTROL)
     with pytest.raises(ValueError): Opponent("aurora", b"bad")
-    control, candidate = Opponent("cataclysm"), Opponent("control-copy", nnue_control())
+    control, candidate = Opponent("cataclysm"), Opponent("control-copy", NNUE_CONTROL)
     assert control.network_fingerprint() == candidate.network_fingerprint()
     assert Opponent("astra").network_fingerprint() is None
     for state in positions(8):
@@ -102,7 +184,7 @@ def test_candidate_actual_search_isolated_identity_and_bounded_analysis():
     assert different.network_fingerprint() != control.network_fingerprint()
     state = positions(4)[-1]
     row = different.analyse(state, time_ms=0, nodes=1)
-    assert row["score"] == nnue_evaluate(zero, [state])[0] and not row["complete"]
+    assert row["score"] == Nnue(zero).positions([state])[0] and not row["complete"]
     with pytest.raises(ValueError): candidate.analyse(state, time_ms=0, nodes=0)
     with pytest.raises(ValueError): candidate.analyse(state, depth=101)
     with pytest.raises(ValueError): candidate.new_game(side=2)
@@ -121,8 +203,9 @@ def test_tiny_update_export_and_optimizer_resume_are_exact(tmp_path, jit):
         assert np.isfinite(metrics["loss"]) and metrics["gradient_norm"] > 0
     assert not np.array_equal(before, learner.model.features.numpy())
     encoded = learner.model.export()
-    expected = nnue_evaluate(encoded, states)
+    expected = Nnue(encoded).positions(states)
     np.testing.assert_array_equal(metal_scores(learner.model, ids, baseline, side), expected)
+    np.testing.assert_array_equal(learner.model.scores(ids, baseline, side), expected)
     path = tmp_path / "candidate.safetensors"
     nnue.save(path, learner, {"smoke_test": True})
     restored, info = nnue.load(path, training=True, jit=jit)

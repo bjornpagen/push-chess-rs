@@ -2,9 +2,10 @@
 //! Rust Vec allocations become NumPy-owned buffers; no element-wise boxing.
 use numpy::{
     IntoPyArray, PyArray1, PyArray2, PyArray3, PyArray4, PyReadonlyArray1, PyReadonlyArray2,
-    PyUntypedArrayMethods, ndarray::Array,
+    PyReadonlyArray3, PyUntypedArrayMethods, ndarray::Array,
 };
 use push_chess::core::types::{Color, SearchBudget};
+use push_chess::engines::cataclysm::Model;
 use push_chess::engines::cataclysm::learning as nnue;
 use push_chess::selfplay::{self, ACTION_FIELDS, Encoded, Features};
 use pyo3::exceptions::PyValueError;
@@ -113,11 +114,6 @@ fn nnue_batch(py: Python<'_>, rows: Vec<nnue::Input>) -> NnueBatch<'_> {
 }
 
 #[pyfunction]
-fn nnue_control(py: Python<'_>) -> Bound<'_, pyo3::types::PyBytes> {
-    pyo3::types::PyBytes::new(py, nnue::CONTROL_BYTES)
-}
-
-#[pyfunction]
 fn nnue_inputs<'py>(py: Python<'py>, states: Vec<PyRef<'_, State>>) -> PyResult<NnueBatch<'py>> {
     if states.len() > 4096 {
         return Err(PyValueError::new_err("NNUE batch exceeds 4096 positions"));
@@ -131,21 +127,79 @@ fn nnue_inputs<'py>(py: Python<'py>, states: Vec<PyRef<'_, State>>) -> PyResult<
     ))
 }
 
-#[pyfunction]
-fn nnue_evaluate<'py>(
-    py: Python<'py>,
-    model: &[u8],
-    states: Vec<PyRef<'_, State>>,
-) -> PyResult<Bound<'py, PyArray1<i32>>> {
-    if states.len() > 4096 {
-        return Err(PyValueError::new_err("NNUE batch exceeds 4096 positions"));
+/// Frozen native backend of pushzero.nnue.Model. Weights are decoded once;
+/// batch calls use the actual search evaluator/accumulator, never a copy.
+#[pyclass(frozen)]
+struct Nnue {
+    model: Model,
+}
+#[pymethods]
+impl Nnue {
+    #[new]
+    fn new(bytes: &[u8]) -> PyResult<Self> {
+        Ok(Self {
+            model: Model::decode(bytes).map_err(PyValueError::new_err)?,
+        })
     }
-    let evaluator = nnue::Evaluator::decode(model).map_err(PyValueError::new_err)?;
-    Ok(states
-        .iter()
-        .map(|s| evaluator.evaluate(s.inner.position()))
-        .collect::<Vec<_>>()
-        .into_pyarray(py))
+    fn positions<'py>(
+        &self,
+        py: Python<'py>,
+        states: Vec<PyRef<'_, State>>,
+    ) -> PyResult<Bound<'py, PyArray1<i32>>> {
+        if states.len() > 4096 {
+            return Err(PyValueError::new_err("NNUE batch exceeds 4096 positions"));
+        }
+        Ok(states
+            .iter()
+            .map(|s| self.model.evaluate(s.inner.position()))
+            .collect::<Vec<_>>()
+            .into_pyarray(py))
+    }
+    fn scores<'py>(
+        &self,
+        py: Python<'py>,
+        ids: PyReadonlyArray3<'_, u16>,
+        baselines: PyReadonlyArray1<'_, i32>,
+        sides: PyReadonlyArray1<'_, u8>,
+    ) -> PyResult<Bound<'py, PyArray1<i32>>> {
+        let count = ids.shape()[0];
+        if count > 4096
+            || ids.shape()[1..] != [2, nnue::SLOTS]
+            || baselines.shape() != [count]
+            || sides.shape() != [count]
+        {
+            return Err(PyValueError::new_err("invalid NNUE batch shape"));
+        }
+        // Borrow contiguous arrays for one bounded call. Keep Python attached:
+        // no other Python thread may mutate these borrowed NumPy inputs.
+        let ids = ids.as_slice()?;
+        let baselines = baselines.as_slice()?;
+        let sides = sides.as_slice()?;
+        let mut scores = Vec::with_capacity(count);
+        for ((row, &baseline), &side) in ids
+            .as_chunks::<{ 2 * nnue::SLOTS }>()
+            .0
+            .iter()
+            .zip(baselines)
+            .zip(sides)
+        {
+            let side = match side {
+                0 => Color::White,
+                1 => Color::Black,
+                _ => return Err(PyValueError::new_err("invalid NNUE side")),
+            };
+            let ids = [
+                row[..nnue::SLOTS].try_into().unwrap(),
+                row[nnue::SLOTS..].try_into().unwrap(),
+            ];
+            scores.push(
+                self.model
+                    .score_features(&ids, baseline, side)
+                    .map_err(PyValueError::new_err)?,
+            );
+        }
+        Ok(scores.into_pyarray(py))
+    }
 }
 
 fn evaluation_request(py: Python<'_>, id: u64, f: Features) -> EvaluationRequest<'_> {
@@ -906,10 +960,24 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SearchRuntime>()?;
     m.add_class::<Opponent>()?;
     m.add_class::<CorpusReader>()?;
+    m.add_class::<Nnue>()?;
     m.add_function(wrap_pyfunction!(observations, m)?)?;
-    m.add_function(wrap_pyfunction!(nnue_control, m)?)?;
     m.add_function(wrap_pyfunction!(nnue_inputs, m)?)?;
-    m.add_function(wrap_pyfunction!(nnue_evaluate, m)?)?;
+    m.add(
+        "NNUE_CONTROL",
+        pyo3::types::PyBytes::new(m.py(), Model::CONTROL_BYTES),
+    )?;
+    let spec = pyo3::types::PyDict::new(m.py());
+    spec.set_item("format", Model::FORMAT)?;
+    spec.set_item("bytes", Model::BYTES)?;
+    spec.set_item("features", nnue::FEATURES)?;
+    spec.set_item("width", nnue::WIDTH)?;
+    spec.set_item("slots", nnue::SLOTS)?;
+    spec.set_item("hidden_clip", nnue::HIDDEN_CLIP)?;
+    spec.set_item("residual_divisor", nnue::RESIDUAL_DIVISOR)?;
+    spec.set_item("tempo", nnue::TEMPO)?;
+    spec.set_item("score_limit", nnue::SCORE_LIMIT)?;
+    m.add("NNUE_SPEC", spec)?;
     m.add("RULES_VERSION", selfplay::RULES_VERSION)?;
     m.add("ENCODING_VERSION", selfplay::ENCODING_VERSION)?;
     m.add("EFFECT_ENCODING_VERSION", selfplay::EFFECT_ENCODING_VERSION)?;

@@ -1,6 +1,7 @@
 //! Incremental piece-square baseline and outcome-trained neural evaluation.
 //! No database access, opponent identity, or memorized game moves.
 use super::board::Board;
+use super::network::{SCORE_LIMIT, TEMPO};
 use crate::core::types::*;
 use std::sync::LazyLock;
 
@@ -61,19 +62,18 @@ pub(super) fn baseline_white(b: &Board) -> i32 {
 
 pub fn evaluate<const V: usize>(b: &Board) -> i32 {
     let profile = super::experiments::PROFILES[V];
-    let mut white = baseline_white(b) + profile.neural_scale * (b.net.white_residual(b.model) / 2);
+    let mut white = baseline_white(b) + profile.neural_scale * b.net.white_residual(b.model);
     if profile.geometry {
         white += super::experiments::geometry(b);
     }
     if profile.logistics {
         white += super::experiments::logistics(b);
     }
-    (if b.pos.side_to_move == Color::White {
-        white
-    } else {
-        -white
-    } + 14)
-        .clamp(-28_000, 28_000)
+    relative_score(white, b.pos.side_to_move)
+}
+
+pub(super) fn relative_score(white: i32, side: Color) -> i32 {
+    (if side == Color::White { white } else { -white } + TEMPO).clamp(-SCORE_LIMIT, SCORE_LIMIT)
 }
 
 const PASSED: [[u64; 64]; 2] = {

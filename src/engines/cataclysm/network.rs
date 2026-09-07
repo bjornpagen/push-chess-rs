@@ -5,6 +5,11 @@ use std::sync::{Arc, LazyLock};
 
 pub const WIDTH: usize = 32;
 pub const FEATURES: usize = 2 * 6 * 64;
+pub const SLOTS: usize = 64;
+pub const HIDDEN_CLIP: i32 = 256;
+pub const RESIDUAL_DIVISOR: i64 = 8192;
+pub const TEMPO: i32 = 14;
+pub const SCORE_LIMIT: i32 = 28_000;
 type FeatureWeights = [[i16; WIDTH]; FEATURES];
 
 pub(super) fn feature_index(piece: Piece, sq: u8, perspective: usize) -> usize {
@@ -20,8 +25,7 @@ pub struct Network {
 }
 static MODEL: LazyLock<Arc<Network>> = LazyLock::new(|| {
     Arc::new(
-        Network::decode(include_bytes!("network.bin"))
-            .expect("embedded network has the specified shape"),
+        Network::decode(Model::CONTROL_BYTES).expect("embedded network has the specified shape"),
     )
 });
 
@@ -31,6 +35,8 @@ static MODEL: LazyLock<Arc<Network>> = LazyLock::new(|| {
 pub struct Model(Arc<Network>);
 impl Model {
     pub const BYTES: usize = (FEATURES + 2) * WIDTH * 2;
+    pub const FORMAT: &str = "cataclysm-residual-v1";
+    pub const CONTROL_BYTES: &'static [u8] = include_bytes!("network.bin");
     pub fn embedded() -> Self {
         Self(Arc::clone(&MODEL))
     }
@@ -41,6 +47,11 @@ impl Model {
     }
     pub fn fingerprint(&self) -> u64 {
         self.0.fingerprint
+    }
+    /// Rebuild through the deployed board/evaluator, never a learning-only
+    /// copy of the scoring formula. Tree search maintains this state by delta.
+    pub fn evaluate(&self, pos: &crate::core::position::Position) -> i32 {
+        super::eval::evaluate::<0>(&super::board::Board::with_model(pos, self.network()))
     }
     pub(super) fn network(&self) -> &Network {
         &self.0
@@ -89,19 +100,33 @@ impl Accumulator {
 
 impl Accumulator {
     pub fn update(&mut self, piece: Piece, sq: u8, sign: i32, model: &Network) {
-        for (perspective, hidden) in self.hidden.iter_mut().enumerate() {
-            let weights = &model.weights[feature_index(piece, sq, perspective)];
-            for (acc, &w) in hidden.iter_mut().zip(weights) {
-                *acc += sign * i32::from(w);
-            }
+        for perspective in 0..2 {
+            self.update_feature(
+                perspective,
+                feature_index(piece, sq, perspective),
+                sign,
+                model,
+            );
+        }
+    }
+    pub(super) fn update_feature(
+        &mut self,
+        perspective: usize,
+        id: usize,
+        sign: i32,
+        model: &Network,
+    ) {
+        for (acc, &w) in self.hidden[perspective].iter_mut().zip(&model.weights[id]) {
+            *acc += sign * i32::from(w);
         }
     }
     pub fn white_residual(&self, model: &Network) -> i32 {
         let mut sum = 0i64;
         for i in 0..WIDTH {
-            let difference = self.hidden[0][i].clamp(0, 256) - self.hidden[1][i].clamp(0, 256);
+            let difference =
+                self.hidden[0][i].clamp(0, HIDDEN_CLIP) - self.hidden[1][i].clamp(0, HIDDEN_CLIP);
             sum += i64::from(difference) * i64::from(model.output[i]);
         }
-        (sum / (256 * 16)) as i32
+        (sum / RESIDUAL_DIVISOR) as i32
     }
 }

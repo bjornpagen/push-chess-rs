@@ -3,15 +3,14 @@
 //! No game storage and no changes to the immutable embedded control network.
 use super::{
     board::Board,
-    eval::baseline_white,
-    network::{Accumulator, Network},
+    eval::{baseline_white, relative_score},
+    network::{Accumulator, Model},
 };
 use crate::core::{position::Position, types::Color};
 
-pub const FEATURES: usize = super::network::FEATURES;
-pub const SLOTS: usize = 64;
-pub const WIDTH: usize = super::network::WIDTH;
-pub const CONTROL_BYTES: &[u8] = include_bytes!("network.bin");
+pub use super::network::{
+    FEATURES, HIDDEN_CLIP, RESIDUAL_DIVISOR, SCORE_LIMIT, SLOTS, TEMPO, WIDTH,
+};
 
 pub struct Input {
     /// White and color/rank-reflected perspectives; FEATURES is zero padding.
@@ -39,24 +38,41 @@ pub fn input(pos: &Position) -> Input {
     }
 }
 
-/// A separate candidate, never installed into the running search implicitly.
-pub struct Evaluator(Network);
-impl Evaluator {
-    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        Network::decode(bytes).map(Self).map_err(|e| e.to_string())
-    }
-    pub fn evaluate(&self, pos: &Position) -> i32 {
-        let mut acc = Accumulator::new(&self.0);
-        for (square, piece) in pos.board.iter().enumerate().filter(|(_, p)| !p.is_empty()) {
-            acc.update(*piece, square as u8, 1, &self.0);
+impl Model {
+    /// Sparse whole-batch inference uses the deployed accumulator kernel and
+    /// score conversion. The caller supplies the shared handwritten baseline.
+    /// This is the same backend as search, not a separate integer evaluator.
+    pub fn score_features(
+        &self,
+        ids: &[[u16; SLOTS]; 2],
+        baseline: i32,
+        side: Color,
+    ) -> Result<i32, String> {
+        // Bounds also make externally supplied baselines safe to add/negate.
+        if baseline.unsigned_abs() > (1 << 23) {
+            return Err("baseline outside exact NNUE input range".into());
         }
-        let white = baseline_white(&Board::new(pos)) + acc.white_residual(&self.0) / 2;
-        ((if pos.side_to_move == Color::White {
-            white
-        } else {
-            -white
-        }) + 14)
-            .clamp(-28_000, 28_000)
+        let model = self.network();
+        let mut acc = Accumulator::new(model);
+        for (perspective, row) in ids.iter().enumerate() {
+            let mut seen = [0u64; FEATURES / 64];
+            for &id in row {
+                let id = usize::from(id);
+                if id == FEATURES {
+                    continue;
+                }
+                if id > FEATURES {
+                    return Err("invalid NNUE feature ID".into());
+                }
+                let mask = 1u64 << (id % 64);
+                if seen[id / 64] & mask != 0 {
+                    return Err("duplicate NNUE feature ID".into());
+                }
+                seen[id / 64] |= mask;
+                acc.update_feature(perspective, id, 1, model);
+            }
+        }
+        Ok(relative_score(baseline + acc.white_residual(model), side))
     }
 }
 
@@ -66,9 +82,9 @@ mod tests {
     use crate::selfplay::State;
     #[test]
     fn learning_input_and_integer_reference_match_live_control() {
-        let model = Evaluator::decode(CONTROL_BYTES).unwrap();
-        assert!(Evaluator::decode(&CONTROL_BYTES[..100]).is_err());
-        let words: Vec<_> = CONTROL_BYTES
+        let model = Model::embedded();
+        assert!(Model::decode(&Model::CONTROL_BYTES[..100]).is_err());
+        let words: Vec<_> = Model::CONTROL_BYTES
             .as_chunks::<2>()
             .0
             .iter()
@@ -103,6 +119,12 @@ mod tests {
             }) + 14)
                 .clamp(-28000, 28000);
             assert_eq!(score, model.evaluate(pos));
+            assert_eq!(
+                score,
+                model
+                    .score_features(&row.ids, row.baseline, pos.side_to_move)
+                    .unwrap()
+            );
             assert_eq!(score, super::super::eval::evaluate::<0>(&Board::new(pos)));
             if state.legal_moves().is_empty() {
                 state = State::default();

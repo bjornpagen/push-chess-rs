@@ -685,7 +685,7 @@ mod tests {
         config.engines = vec!["cataclysm".into(), "aurora-fixture".into()];
         config.pairs = 2;
         config.workers = 2;
-        let bytes = push_chess::engines::cataclysm::learning::CONTROL_BYTES;
+        let bytes = push_chess::engines::cataclysm::Model::CONTROL_BYTES;
         let roster = Roster::resolve(
             &config.engines,
             vec![Candidate::decode("aurora-fixture", bytes).unwrap()],

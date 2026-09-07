@@ -17,19 +17,22 @@ import uuid
 import numpy as np
 from tinygrad import Context, Device, Tensor, TinyJit, nn
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict, safe_load, safe_load_metadata, safe_save
-from ._native import RULES_VERSION, nnue_control
+from ._native import RULES_VERSION, NNUE_CONTROL, NNUE_SPEC, Nnue as _NativeNnue
 from .corpus import games
 from .learning import optimizer_state
 
-FEATURES, WIDTH, SLOTS = 768, 32, 64
-MODEL_BYTES = (FEATURES + 2) * WIDTH * 2
-FORMAT = "cataclysm-residual-v1"
+# The deployed engine owns the format and score contract; Python does not
+# maintain a parallel set of dimensions, clipping bounds or divisors.
+FEATURES, WIDTH, SLOTS = (NNUE_SPEC[k] for k in ("features", "width", "slots"))
+MODEL_BYTES, FORMAT = NNUE_SPEC["bytes"], NNUE_SPEC["format"]
+HIDDEN_CLIP, RESIDUAL_DIVISOR = NNUE_SPEC["hidden_clip"], NNUE_SPEC["residual_divisor"]
+TEMPO, SCORE_LIMIT = NNUE_SPEC["tempo"], NNUE_SPEC["score_limit"]
 # Q4 feature/bias and Q10 output parameters give useful float optimizer scales.
 SCALES = {"features": 16, "bias": 16, "output": 1024}
 SHAPES = {"features": (FEATURES, WIDTH), "bias": (WIDTH,), "output": (WIDTH,)}
 # Keeps every clipped integer dot product below 2**24, exactly representable
 # in float32. Rust accepts the full i16 format; this learner uses a safe subset.
-OUTPUT_LIMIT = 2047
+OUTPUT_LIMIT = ((1 << 24) - 1) // (WIDTH * HIDDEN_CLIP)
 
 
 def decode(data):
@@ -39,11 +42,15 @@ def decode(data):
             "bias": words[FEATURES*WIDTH:(FEATURES+1)*WIDTH], "output": words[(FEATURES+1)*WIDTH:]}
 
 
-def _feature_ids(ids):
+def _feature_ids(ids, *, unique=True):
     ids = np.asarray(ids)
     if ids.ndim != 3 or ids.shape[1:] != (2, SLOTS) or ids.dtype.kind not in "iu" or np.any(ids > FEATURES):
         raise ValueError("expected [N,2,64] feature IDs in 0..768")
     if ids.dtype.kind == "i" and np.any(ids < 0): raise ValueError("negative feature ID")
+    if unique:
+        ordered = np.sort(ids, axis=2)
+        if np.any((ordered[:, :, 1:] == ordered[:, :, :-1]) & (ordered[:, :, 1:] != FEATURES)):
+            raise ValueError("duplicate NNUE feature ID")
     return ids
 
 
@@ -59,41 +66,65 @@ def dense_features(ids):
     return np.ascontiguousarray(dense[:, :, :FEATURES])
 
 
-def integer_scores(data, ids, baselines, sides):
-    """Independent int64 reference for all i16 models, including negative /.
-
-    Rust integer division truncates toward zero, unlike Python's //.
-    """
-    p = decode(data)
-    table = np.concatenate((p["features"], np.zeros((1, WIDTH), np.int64)))
-    hidden = np.clip(table[_feature_ids(ids)].sum(axis=2) + p["bias"], 0, 256)
-    total = (hidden[:, 0] - hidden[:, 1]) @ p["output"]
-    residual = np.sign(total) * (np.abs(total) // 8192)
-    return np.clip((np.asarray(baselines, np.int64) + residual) * (1 - 2*np.asarray(sides, np.int64)) + 14,
-                   -28000, 28000).astype(np.int32)
-
-
 def _quantize(x, scale, low, high):
     value = (x * scale).clip(low, high)
     return value + (value.round() - value).detach()
 
 
-class Residual:
-    def __init__(self, data=None):
-        params = decode(nnue_control() if data is None else data)
+class Model:
+    """One NNUE interface: differentiable training and exact deployed scoring.
+
+    Tinygrad owns autodiff; the native search accumulator owns frozen integer
+    inference. There is no NumPy evaluator or learning-only Rust score formula.
+    """
+    def __init__(self, data=None, *, device=None):
+        params = decode(NNUE_CONTROL if data is None else data)
         if np.max(np.abs(params["output"])) > OUTPUT_LIMIT:
             raise ValueError("output weights exceed exact float32 training range")
         for key, value in params.items():
-            setattr(self, key, Tensor((value / SCALES[key]).astype(np.float32), device=Device.DEFAULT).realize())
+            setattr(self, key, Tensor((value / SCALES[key]).astype(np.float32), device=device or Device.DEFAULT).realize())
 
     def __call__(self, features, baselines, sides):
-        weight = _quantize(self.features, 16, -32768, 32767)
-        bias = _quantize(self.bias, 16, -32768, 32767)
-        output = _quantize(self.output, 1024, -OUTPUT_LIMIT, OUTPUT_LIMIT)
-        hidden = (features @ weight + bias).clip(0, 256)
-        residual = ((hidden[:, 0] - hidden[:, 1]) * output).sum(axis=1) / 8192
+        weight = _quantize(self.features, SCALES["features"], -32768, 32767)
+        bias = _quantize(self.bias, SCALES["bias"], -32768, 32767)
+        output = _quantize(self.output, SCALES["output"], -OUTPUT_LIMIT, OUTPUT_LIMIT)
+        hidden = (features @ weight + bias).clip(0, HIDDEN_CLIP)
+        residual = ((hidden[:, 0] - hidden[:, 1]) * output).sum(axis=1) / RESIDUAL_DIVISOR
         residual = residual + (residual.trunc() - residual).detach()
-        return ((baselines + residual) * (1 - 2*sides) + 14).clip(-28000, 28000)
+        return ((baselines + residual) * (1 - 2*sides) + TEMPO).clip(-SCORE_LIMIT, SCORE_LIMIT)
+
+    def scores(self, ids, baselines, sides, *, batch_size=256):
+        """Exact frozen inference through the deployed backend, in owned batches.
+
+        Export once per pass, not per row. A fresh immutable snapshot avoids
+        stale inference weights after an optimizer update. No backend fallback.
+        """
+        if not 1 <= batch_size <= 4096: raise ValueError("NNUE batch size must be 1..4096")
+        ids = np.asarray(ids)
+        if ids.ndim != 3 or ids.shape[1:] != (2, SLOTS): raise ValueError("invalid NNUE batch shape")
+        baselines, sides = np.asarray(baselines), np.asarray(sides)
+        if baselines.shape != (len(ids),) or sides.shape != (len(ids),): raise ValueError("invalid NNUE batch shape")
+        if not np.isfinite(baselines).all() or np.any(np.abs(baselines.astype(np.float64)) > 2**23) or np.any(baselines != np.trunc(baselines)):
+            raise ValueError("baseline outside exact NNUE input range")
+        if not np.isin(sides, (0, 1)).all(): raise ValueError("invalid NNUE side")
+        native = self.freeze()
+        result = np.empty(len(ids), np.int32)
+        for start in range(0, len(ids), batch_size):
+            stop = start + batch_size
+            # Validation/normalization scratch stays batch-bounded too.
+            result[start:stop] = native.scores(np.ascontiguousarray(_feature_ids(ids[start:stop], unique=False), dtype=np.uint16),
+                np.ascontiguousarray(baselines[start:stop], dtype=np.int32), np.ascontiguousarray(sides[start:stop], dtype=np.uint8))
+        return result
+
+    def freeze(self):
+        """Decode once for repeated typed inference calls, independent of training.
+
+        The returned immutable backend offers scores(u16 IDs, i32 baselines,
+        u8 sides) and positions(native states), at most 4096 rows per call.
+        Freeze again explicitly after changing weights; never poll GPU weights
+        or rebuild a model on every inference request.
+        """
+        return _NativeNnue(self.export())
 
     def export(self):
         pieces = []
@@ -109,7 +140,7 @@ class Learner:
     def __init__(self, model=None, *, lr=1e-3, score_scale=400., jit=True):
         if not np.isfinite([lr, score_scale]).all() or min(lr, score_scale) <= 0:
             raise ValueError("positive finite learning rate and score scale required")
-        self.model = Residual() if model is None else model
+        self.model = Model() if model is None else model
         self.optimizer = nn.optim.AdamW(get_parameters(self.model), lr=lr, weight_decay=0.)
         self.score_scale, self.steps, self.jit, self.compiled = score_scale, 0, jit, {}
 
@@ -130,7 +161,7 @@ class Learner:
         # No reduced-precision tensor-core multiplication: QAT must match the
         # actual integer accumulator, not a numerically similar float model.
         with Context(TRAINING=1, TC=0):
-            loss, norm = self.compiled[size](*[Tensor(x, device=Device.DEFAULT) for x in batch])
+            loss, norm = self.compiled[size](*[Tensor(x, device=self.model.features.device) for x in batch])
             metrics = {"loss": float(loss.item()), "gradient_norm": float(norm.item())}
         if not all(np.isfinite(v) for v in metrics.values()): raise FloatingPointError(metrics)
         self.steps += 1
@@ -214,13 +245,9 @@ def dataset(path, *, runs, split, max_games=10000, positions_per_game=16, seed=1
 
 def evaluate(model, data, score_scale=400., batch_size=256):
     """Exact exported evaluator loss, averaged within games then across games."""
-    encoded = model.export()
-    loss = np.empty(len(data.ids), np.float64)
-    for start in range(0, len(loss), batch_size):
-        stop = start + batch_size
-        scores = integer_scores(encoded, data.ids[start:stop], data.baselines[start:stop], data.sides[start:stop])
-        logits = scores.astype(np.float64) / score_scale
-        loss[start:stop] = np.logaddexp(0, logits) - data.targets[start:stop] * logits
+    scores = model.scores(data.ids, data.baselines, data.sides, batch_size=batch_size)
+    logits = scores.astype(np.float64) / score_scale
+    loss = np.logaddexp(0, logits) - data.targets * logits
     means = np.add.reduceat(loss, data.offsets[:-1]) / np.diff(data.offsets)
     return {"loss": float(means.mean()), "games": len(means), "positions": len(loss)}
 
@@ -231,7 +258,7 @@ def save(path, learner, metadata):
     path.parent.mkdir(parents=True, exist_ok=True)
     info = {**metadata, "format": FORMAT, "rules": RULES_VERSION, "tinygrad": importlib.metadata.version("tinygrad"),
             "steps": learner.steps, "score_scale": learner.score_scale,
-            "control_sha256": hashlib.sha256(nnue_control()).hexdigest(),
+            "control_sha256": hashlib.sha256(NNUE_CONTROL).hexdigest(),
             "export_sha256": hashlib.sha256(learner.model.export()).hexdigest()}
     tensors = {"model." + k: v for k, v in get_state_dict(learner.model).items()}
     tensors.update({"optimizer." + k: v for k, v in optimizer_state(learner.optimizer).items()})
@@ -244,13 +271,13 @@ def save(path, learner, metadata):
     return info
 
 
-def load(path, *, training=False, jit=True):
+def load(path, *, training=False, jit=True, device=None):
     info = json.loads(safe_load_metadata(str(path))[2]["__metadata__"]["nnue"])
     if info.get("format") != FORMAT or info.get("rules") != RULES_VERSION:
         raise ValueError("NNUE checkpoint rules/format mismatch")
     if info.get("tinygrad") != importlib.metadata.version("tinygrad"):
         raise ValueError("NNUE checkpoint tinygrad differs from pinned runtime")
-    model, tensors = Residual(), safe_load(str(path))
+    model, tensors = Model(device=device), safe_load(str(path))
     state = {k.removeprefix("model."): v for k, v in tensors.items() if k.startswith("model.")}
     if {k: v.shape for k, v in state.items()} != SHAPES: raise ValueError("NNUE parameter schema mismatch")
     load_state_dict(model, state, verbose=False)
@@ -267,7 +294,7 @@ def load(path, *, training=False, jit=True):
 
 
 def train(db, output, *, runs, steps=1000, batch_size=256, max_games=10000, validation_games=2000,
-          positions_per_game=16, seed=1, resume=None, jit=True):
+          positions_per_game=16, seed=1, resume=None, jit=True, device=None):
     if Path(output).exists(): raise FileExistsError(output)
     if not 1 <= steps <= 1000000 or not 1 <= batch_size <= 4096: raise ValueError("bounded positive step/batch limits required")
     Tensor.manual_seed(seed)
@@ -275,9 +302,9 @@ def train(db, output, *, runs, steps=1000, batch_size=256, max_games=10000, vali
     validation = dataset(db, runs=runs, split="validation", max_games=validation_games, positions_per_game=positions_per_game, seed=seed)
     if source.opening_families & validation.opening_families:
         raise ValueError("training and validation opening families overlap")
-    learner = load(resume, training=True, jit=jit)[0] if resume else Learner(jit=jit)
+    learner = load(resume, training=True, jit=jit, device=device)[0] if resume else Learner(Model(device=device),jit=jit)
     before = evaluate(learner.model, validation, learner.score_scale)
-    control = evaluate(Residual(), validation, learner.score_scale)
+    control = evaluate(Model(device=device), validation, learner.score_scale)
     stopped, rng, started, metrics = False, np.random.default_rng(seed), time.monotonic(), {}
     def stop(*_):
         nonlocal stopped
@@ -294,6 +321,7 @@ def train(db, output, *, runs, steps=1000, batch_size=256, max_games=10000, vali
     return save(output, learner, {"training": source.provenance, "validation": validation.provenance,
         "parent": str(resume) if resume else None, "parent_sha256": hashlib.sha256(Path(resume).read_bytes()).hexdigest() if resume else None,
         "seconds": time.monotonic()-started, "interrupted": stopped, "metrics": metrics,
+        "training_device": learner.model.features.device,
         "validation_before": before, "validation_after": after, "validation_control": control, "promotion_ready": False})
 
 

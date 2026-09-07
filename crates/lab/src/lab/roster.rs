@@ -155,7 +155,7 @@ impl Roster {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const CONTROL: &[u8] = engines::cataclysm::learning::CONTROL_BYTES;
+    const CONTROL: &[u8] = Model::CONTROL_BYTES;
 
     #[test]
     fn candidates_cannot_shadow_controls_or_be_silently_ignored() {

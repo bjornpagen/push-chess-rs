@@ -43,23 +43,30 @@ bumbledb has one process owner; do not open another process against a live
 store. The local control socket is not a second datasource. Progress logs are
 disposable; every reported committed game is in bumbledb.
 
-## Metal training
+## NNUE training
 
-The tinygrad model, Metal inference, learner, native batched search and
-in-memory self-play primitives remain. The supported durable training path
-now reads teacher examples directly from bumbledb:
+The current learning loop improves Cataclysm's small residual without replacing
+classical search. One NNUE interface selects the appropriate implementation:
+native incremental inference in search, tinygrad differentiation for training.
+The deployed model owns the format and feature contract. Training reads only
+explicit, sealed bumbledb source runs:
 
 ```sh
 uv sync --group dev
 uv run maturin develop --release
-uv run pushzero pretrain --db data/corpus --output models/student.safetensors \
-  --steps 1000 --batch-size 128 --channels 64 --blocks 4
+uv run pushzero nnue train --db data/corpus --runs 2 \
+  --output models/residual-r2.safetensors --steps 1000 --batch-size 256
+uv run pushzero nnue export models/residual-r2.safetensors \
+  --output models/residual-r2.bin
 ```
 
-Run this **after** the tournament releases the store. Pretraining is opt-in,
+Run this **after** the tournament releases the store and passes replay audit. Training is opt-in,
 not part of tournament generation. Model/optimizer tensors are checkpoint
 artifacts, not game stores. Search scores are retained as observations;
 only rules-verified endings supply value labels. A game cap is not a draw.
+Candidate artifacts do not replace the embedded control. Require fresh paired
+arenas before promotion. Full-policy Metal/self-play tools remain available
+for later work; see [training](training/README.md).
 
 ## Layout
 

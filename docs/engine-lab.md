@@ -61,6 +61,13 @@ Each root borrows a network through its board; recursive node search performs
 no reference counting. A search's model cannot be swapped under its TT/history.
 Candidates retain the same 32-MiB worker-owned tables as controls.
 
+NNUE has one format contract and one deployed accumulator/scoring kernel.
+The Python `pushzero.nnue.Model` interface uses that kernel for frozen batch
+inference and tinygrad for differentiation. The separate learning-only Rust
+evaluator and NumPy production scoring path are gone. `pushzero nnue benchmark`
+compares complete inference and training workloads before backend decisions;
+training and per-node inference need not select the same device.
+
 A bounded channel (two game slots per worker) hands owned trajectories to one
 writer. A failed move or worker panic stops the campaign; no replacement move
 is invented. The writer drains workers on shutdown and seals the run status.

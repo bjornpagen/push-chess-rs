@@ -20,11 +20,7 @@ fn repeated_candidate_flags_generate_normalized_games_without_replacing_controls
     let temp = tempfile::tempdir().unwrap();
     let db = temp.path().join("corpus");
     let model = temp.path().join("candidate.bin");
-    std::fs::write(
-        &model,
-        push_chess::engines::cataclysm::learning::CONTROL_BYTES,
-    )
-    .unwrap();
+    std::fs::write(&model, push_chess::engines::cataclysm::Model::CONTROL_BYTES).unwrap();
     let db = db.to_str().unwrap();
     let first = format!("first-copy={}", model.display());
     let second = format!("second-copy={}", model.display());
