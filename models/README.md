@@ -14,11 +14,13 @@ Each inference export is 49,280 bytes for the existing 768-feature,
 training provenance; the linked reports record their SHA256 identities.
 All four files retain the exact bytes used for the reported comparisons.
 
-The r2 checkpoint is historical v1 training state. Current training can use it
-with `--init` (weights only), not as a current-rules resume. The r3 checkpoint
-uses corrected v2 rules and retains optimizer/sampler state. Its parent weights
-are still v1-derived. Use new output names when training or exporting; the
-preserved files must not be overwritten.
+The r2 checkpoint is an archived historical artifact and is not accepted by
+the current trainer. Its exported inference weights remain usable as a control.
+R3 matches the current checkpoint contract; its ancestry is still historical.
+The original training corpus was purged, so exact sampling resume/reproduction
+is no longer available. A future pass may initialize from r3 weights using
+`--init`, with newly collected data. Use new output names; preserved files
+must not be overwritten.
 
 R3 improved same-sample validation loss by 1.11% versus r2 and scored 53.52%
 across the two fixed small playing checks (256 games). That is encouraging,

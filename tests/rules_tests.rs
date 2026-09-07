@@ -1,4 +1,4 @@
-use push_chess::core::{movegen::generate_legal_moves, position::Position, rules::Rules, types::*};
+use push_chess::core::{movegen::generate_legal_moves, position::Position, types::*};
 
 #[test]
 fn castles_use_occupied_transit_and_preserve_both_knight_routes() {
@@ -35,41 +35,23 @@ fn castles_use_occupied_transit_and_preserve_both_knight_routes() {
         assert_eq!(current.zobrist, original.zobrist);
         // Specialized neural and core transactions must agree on legal play.
         push_chess::engines::cataclysm::verify_rules(&current).unwrap();
-        let mut old = Position::try_from_fen_with_rules(fen, Rules::HistoryV1).unwrap();
-        moves.clear();
-        generate_legal_moves(&mut old, &mut moves);
-        assert!(
-            moves.iter().any(|m| m.special == SpecialMove::Castle),
-            "historical {fen}"
-        );
-        push_chess::engines::cataclysm::verify_rules(&old).unwrap();
     }
 }
 
 #[test]
-fn rules_identity_survives_copy_make_unmake_and_separates_hashes() {
-    assert!(Rules::parse("invented-rules").is_err());
-    assert_eq!(
-        Rules::parse("push-chess-v1-history-castling"),
-        Ok(Rules::HistoryV1)
-    );
+fn current_hash_survives_copy_make_unmake() {
     let fen = "r3k2r/8/8/3pP3/8/8/8/R3K2R w KQkq d6 0 1";
-    let old = Position::try_from_fen_with_rules(fen, Rules::HistoryV1).unwrap();
-    let new = Position::try_from_fen(fen).unwrap();
-    assert_ne!(old.zobrist, new.zobrist);
-    for pos in [old, new] {
-        assert_eq!(pos.rules, pos.without_history().rules);
-        let mut view = pos.clone();
-        let mut moves = Vec::new();
-        generate_legal_moves(&mut view, &mut moves);
-        for mv in moves {
-            view.make_move(&mv);
-            let hash = view.zobrist;
-            view.compute_zobrist();
-            assert_eq!(view.zobrist, hash);
-            assert_eq!(view.rules, pos.rules);
-            view.unmake_move();
-            assert_eq!(view.zobrist, pos.zobrist);
-        }
+    let pos = Position::try_from_fen(fen).unwrap();
+    assert_eq!(pos.zobrist, pos.without_history().zobrist);
+    let mut view = pos.clone();
+    let mut moves = Vec::new();
+    generate_legal_moves(&mut view, &mut moves);
+    for mv in moves {
+        view.make_move(&mv);
+        let hash = view.zobrist;
+        view.compute_zobrist();
+        assert_eq!(view.zobrist, hash);
+        view.unmake_move();
+        assert_eq!(view.zobrist, pos.zobrist);
     }
 }

@@ -1,5 +1,10 @@
 # Run 4: completed comparison and first actual game review
 
+> Historical record: old-rules Runs 1–4 and their training data were purged in
+> the [single-rules corpus cutover](corpus-cutover.md). Only Runs 5–6 remain.
+> Old replay commands and training reproductions below require data no longer
+> present in the live corpus; they are not current operating instructions.
+
 ## Result and audit — 2026-09-07
 
 The original tournament owner exited normally. Run 4 is sealed as `finished`:

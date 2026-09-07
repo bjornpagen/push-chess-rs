@@ -40,8 +40,9 @@ def test_native_game_pages_have_owned_arrays_and_exact_targets(corpus):
     assert len(all_games) == 6
     assert sum(len(g["moves"]) for g in all_games) == totals["moves"]
     for game in all_games:
-        assert game["rules"] == RULES_VERSION == "push-chess-history-v2"
-        assert game["castling_transit_anomalies"] == []
+        assert RULES_VERSION == "push-chess-history-v2"
+        assert "rules" not in game
+        assert "castling_transit_anomalies" not in game
         assert game["moves"].dtype == np.uint32
         assert game["analysis"].shape == (len(game["moves"]),6)
         assert isinstance(game["trajectory_key"], bytes)
@@ -70,16 +71,13 @@ def test_teacher_pretraining_keeps_only_tensor_checkpoint_artifacts(corpus, tmp_
     with pytest.raises(FileExistsError): train(corpus,path,steps=1)
 
 
-def test_historical_rules_are_explicit_and_policy_training_fails_closed():
+def test_only_current_rules_can_be_constructed():
     fen = "k7/8/8/8/8/8/7n/4K2R w K - 0 1"
-    old = State(fen,rules="push-chess-history-v1")
-    new = State(fen)
+    state = State(fen)
     castle = 4 | (6 << 6) | (1 << 18)
-    assert castle in old.legal_ids() and castle not in new.legal_ids()
-    assert old.copy().rules() == "push-chess-history-v1" and new.rules() == RULES_VERSION
-    assert State(fen,rules="push-chess-v1-history-castling").rules() == old.rules()
-    with pytest.raises(ValueError,match="unknown rules"): State(fen,rules="unknown")
-    with pytest.raises(ValueError,match="current-rules"): samples({"rules":old.rules()})
+    assert castle not in state.legal_ids()
+    assert castle not in state.copy().legal_ids()
+    with pytest.raises(TypeError): State(fen, rules="push-chess-history-v1")
 
 
 def test_nnue_page_features_are_owned_and_match_exact_replay(corpus):

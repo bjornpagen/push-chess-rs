@@ -123,8 +123,6 @@ pub struct CorpusGame {
     pub trajectory: Trajectory,
     pub trajectory_key: [u8; 32],
     pub binary: [u8; 32],
-    pub rules: String,
-    pub audit: super::ReplayAudit,
 }
 pub struct CorpusPage {
     pub games: Vec<CorpusGame>,
@@ -193,14 +191,6 @@ impl Corpus {
         self.start_resolved(config, &Roster::builtins(&config.engines)?)
     }
     pub(super) fn start_resolved(&self, config: &RunConfig, roster: &Roster) -> Result<u64> {
-        self.start_with_rules(config, roster, super::Rules::default())
-    }
-    fn start_with_rules(
-        &self,
-        config: &RunConfig,
-        roster: &Roster,
-        rules: super::Rules,
-    ) -> Result<u64> {
         config.validate()?;
         roster.validate(&config.engines)?;
         let w = work()?;
@@ -208,7 +198,12 @@ impl Corpus {
             let snapshot = self.db.snapshot(&w)?;
             snapshot
                 .frame(&w)
-                .count(Run::RELATION)?
+                .scan_facts::<Run>()?
+                .map(|run| run.map(|run| run.id.0))
+                .collect::<bumbledb::Result<Vec<_>>>()?
+                .into_iter()
+                .max()
+                .unwrap_or(0)
                 .checked_add(1)
                 .ok_or("run id exhausted")?
         };
@@ -220,7 +215,6 @@ impl Corpus {
             roster,
             digest_file(&std::env::current_exe()?)?,
             now()?,
-            rules,
         )?;
         self.apply(draft, &w)?;
         Ok(id)
@@ -273,9 +267,6 @@ impl Corpus {
                 return Err("game already committed".into());
             }
             let meta = frame.get(RunById { id: run })?.ok_or("missing run")?;
-            if super::Rules::parse(meta.rules)? != game.rules {
-                return Err("game/run rules mismatch".into());
-            }
             relational::config(&frame, &meta)?
         };
         let mut draft = ChangeSet::builder(self.db.schema(), w.clone());
@@ -292,7 +283,7 @@ impl Corpus {
             let status = frame.get(RunEndByRun { run: run.id })?;
             let error = frame.get(RunFailureByRun { run: run.id })?;
             runs.push(json!({"id":run.id.0,"status":status.map(|s|status_name(s.status)).unwrap_or("running"),
-                "config":relational::config(&frame,&run)?,"binary_sha256":hex(&run.binary),"rules":run.rules,
+                "config":relational::config(&frame,&run)?,"binary_sha256":hex(&run.binary),
                 "error":error.map(|e|e.message)}));
         }
         runs.sort_by_key(|r| r["id"].as_u64());
@@ -368,7 +359,7 @@ impl Corpus {
                 "paired":evidence[index].report(config.pairs,matchups.len())})
         }).collect();
         Ok(
-            json!({"run":run,"rules":meta.rules,"binary_sha256":hex(&meta.binary),"status":status.map(|s|status_name(s.status)).unwrap_or("running"),
+            json!({"run":run,"binary_sha256":hex(&meta.binary),"status":status.map(|s|status_name(s.status)).unwrap_or("running"),
             "scheduled_games":config.total_pairs()*2,"matchups":pairs,"promotion_ready":false,
             "uncertainty":"Fixed-sample bounds assume independent opening families; exploratory, not sequential or a held-out promotion test. Incomplete pairs are excluded, not draws."}),
         )
@@ -376,14 +367,14 @@ impl Corpus {
     /// Offline integrity audit. Includes quarantined and interrupted games;
     /// reports observations without changing their training eligibility.
     pub fn verify(&self, run: u64) -> Result<Value> {
-        let (config, rules) = {
+        let config = {
             let w = work()?;
             let snapshot = self.db.snapshot(&w)?;
             let frame = snapshot.frame(&w);
             let meta = frame
                 .get(RunById { id: RunId(run) })?
                 .ok_or("unknown run")?;
-            (relational::config(&frame, &meta)?, meta.rules.to_owned())
+            relational::config(&frame, &meta)?
         };
         let (mut games, mut moves, mut terminal) = (0u64, 0u64, 0u64);
         let mut cost = super::statistics::SearchCost::default();
@@ -393,8 +384,7 @@ impl Corpus {
             .map(|_| super::statistics::SearchCost::default())
             .collect();
         let budget_us = (config.time_ms > 0).then_some(config.time_ms * 1000);
-        let (mut castles, mut transit_anomalies) = (0u64, 0u64);
-        let mut transit_examples = Vec::new();
+        let mut castles = 0u64;
         for index in 0..(config.total_pairs() * 2) as u64 {
             let w = work()?;
             let snapshot = self.db.snapshot(&w)?;
@@ -409,13 +399,6 @@ impl Corpus {
             let game = self.read_game(&frame, &g)?;
             let audit = game.validate()?;
             castles += audit.castles;
-            transit_anomalies += audit.castling_transit_anomalies.len() as u64;
-            for ply in audit.castling_transit_anomalies {
-                if transit_examples.len() < 32 {
-                    transit_examples
-                        .push(json!({"game":index,"ply":ply,"action":game.plies[ply].action}));
-                }
-            }
             games += 1;
             moves += game.plies.len() as u64;
             terminal += u64::from(game.white_value.is_some());
@@ -439,14 +422,12 @@ impl Corpus {
             .map(|(name, cost)| (name.clone(), cost.report()))
             .collect();
         Ok(
-            json!({"run":run,"rules":rules,"verified_games":games,"moves":moves,"positions":moves+games,
+            json!({"run":run,"verified_games":games,"moves":moves,"positions":moves+games,
             "analyses":cost.searches,"completed_searches":cost.complete,"terminal_games":terminal,
             "search_wall_us":cost.wall_us,"search_nodes":cost.nodes,"time_overruns":cost.overruns,
             "search_cost":cost.report(),"search_by_engine":engine_costs,
             "search_cost_note":"Descriptive sums over actual searches, including incomplete searches; openings excluded. Node rates use total measured search time, not campaign elapsed time. Reported q/proof nodes are not time attribution or verified mate certificates.",
-            "castling_audit":{"castles":castles,"transit_anomalies":transit_anomalies,
-                "examples":transit_examples,"example_limit":32,
-                "meaning":"Recorded-rules legal castle whose ordinary one-square king transit is illegal. Warning only; no move/result reclassification."}}),
+            "castling_audit":{"castles":castles}}),
         )
     }
     /// Short-lived snapshots: never pin an hours-long read across map growth.
@@ -525,14 +506,12 @@ impl Corpus {
                     continue;
                 }
                 let trajectory = self.read_game(&frame, &game)?;
-                let audit = trajectory.validate()?;
+                trajectory.validate()?;
                 games.push(CorpusGame {
-                    audit,
                     run_id: id,
                     trajectory,
                     trajectory_key: game.trajectory,
                     binary: run.binary,
-                    rules: run.rules.into(),
                 });
                 if games.len() == limit {
                     return Ok(CorpusPage {
@@ -563,14 +542,12 @@ impl Corpus {
             .get(GameByRunIndex { run: run.id, index })?
             .ok_or("unknown saved game")?;
         let trajectory = self.read_game(&frame, &game)?;
-        let audit = trajectory.validate()?;
+        trajectory.validate()?;
         Ok(CorpusGame {
-            audit,
             run_id: run.id.0,
             trajectory,
             trajectory_key: game.trajectory,
             binary: run.binary,
-            rules: run.rules.into(),
         })
     }
 }
@@ -993,7 +970,7 @@ mod tests {
     }
 
     #[test]
-    fn castling_audit_counts_exposure_without_reclassifying_v1_games() {
+    fn corpus_rejects_unsafe_castles_and_roundtrips_safe_castles() {
         use push_chess::core::{position::Position as Board, types as c};
         let fixtures = [
             ("k7/8/8/8/8/8/7n/4K2R w K - 0 1", true),
@@ -1011,18 +988,23 @@ mod tests {
         let (_dir, mut corpus) = create();
         let mut config = config();
         config.pairs = fixtures.len();
-        let rules = super::super::Rules::HistoryV1;
-        let run = corpus
-            .start_with_rules(&config, &Roster::builtins(&config.engines).unwrap(), rules)
-            .unwrap();
+        let run = corpus.start(&config).unwrap();
         for (i, (fen, anomaly)) in fixtures.into_iter().enumerate() {
-            let mut board = Board::try_from_fen_with_rules(fen, rules).unwrap();
+            let mut board = Board::try_from_fen(fen).unwrap();
             let mut legal = Vec::new();
             super::super::legal_moves(&mut board, &mut legal);
-            let mv = *legal
-                .iter()
-                .find(|m| m.special == c::SpecialMove::Castle)
-                .unwrap();
+            let from = board.king_sq[board.side_to_move as usize];
+            let mv = c::Move {
+                from,
+                to: if board.castling_rights & 5 != 0 {
+                    from + 2
+                } else {
+                    from - 2
+                },
+                special: c::SpecialMove::Castle,
+                ..Default::default()
+            };
+            assert_eq!(legal.contains(&mv), !anomaly);
             let record = super::super::Ply {
                 action: mv.id(),
                 origin: "opening",
@@ -1046,7 +1028,6 @@ mod tests {
                 super::super::terminal(&push_chess::game::adjudicate(&board, &legal));
             let key = super::super::opening_key(fen, std::iter::once(mv.id()));
             let game = Trajectory {
-                rules: board.rules,
                 index: i * 2,
                 pair: Some(i),
                 white: "cataclysm".into(),
@@ -1059,42 +1040,45 @@ mod tests {
                 white_value: value,
                 plies: vec![record],
             };
-            let audit = game.validate().unwrap();
-            assert_eq!(audit.castles, 1);
-            assert_eq!(
-                audit.castling_transit_anomalies,
-                if anomaly { vec![0] } else { vec![] }
-            );
-            corpus.save(run, &game).unwrap();
+            if anomaly {
+                assert!(
+                    corpus
+                        .save(run, &game)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("illegal stored action")
+                );
+            } else {
+                assert_eq!(game.validate().unwrap().castles, 1);
+                corpus.save(run, &game).unwrap();
+                assert_eq!(
+                    corpus.game(run, game.index as u64).unwrap().trajectory,
+                    game
+                );
+            }
         }
         corpus.finish(run, "finished", None).unwrap();
         let report = corpus.verify(run).unwrap();
-        assert_eq!(report["verified_games"], 9);
-        assert_eq!(report["castling_audit"]["castles"], 9);
-        assert_eq!(report["castling_audit"]["transit_anomalies"], 4);
-        let examples = report["castling_audit"]["examples"].as_array().unwrap();
-        assert_eq!(examples.len(), 4);
-        for (i, example) in examples.iter().enumerate() {
-            assert_eq!(example["game"], i * 2);
-            assert_eq!(example["ply"], 0);
-        }
+        assert_eq!(report["verified_games"], 5);
+        assert_eq!(report["castling_audit"]["castles"], 5);
         corpus.close().unwrap();
     }
 
     #[test]
-    fn saved_games_must_match_the_runs_rules_identity() {
-        let (_dir, mut corpus) = create();
-        let run = corpus.start(&config()).unwrap();
-        let mut game = fixture();
-        game.rules = super::super::Rules::HistoryV1;
-        assert!(
-            corpus
-                .save(run, &game)
-                .unwrap_err()
-                .to_string()
-                .contains("rules mismatch")
+    fn run_ids_continue_after_preserved_gaps() {
+        let (_dir, corpus) = create();
+        let config = config();
+        let roster = Roster::builtins(&config.engines).unwrap();
+        let w = work().unwrap();
+        let mut draft = ChangeSet::builder(corpus.db.schema(), w.clone());
+        relational::write_config(&mut draft, RunId(6), &config, &roster, [1; 32], 1).unwrap();
+        corpus.apply(draft, &w).unwrap();
+        assert_eq!(corpus.start(&config).unwrap(), 7);
+        assert_eq!(
+            corpus.summary().unwrap()["runs"].as_array().unwrap().len(),
+            2
         );
-        assert_eq!(corpus.summary().unwrap()["totals"]["games"], 0);
+        corpus.close().unwrap();
     }
 
     #[test]
@@ -1353,7 +1337,6 @@ mod tests {
                 super::super::terminal(&push_chess::game::adjudicate(&board, &legal));
             let key = super::super::opening_key(fen, std::iter::once(mv.id()));
             let g = Trajectory {
-                rules: board.rules,
                 index: i * 2,
                 pair: Some(i),
                 white: "cataclysm".into(),

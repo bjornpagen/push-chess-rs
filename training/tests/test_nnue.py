@@ -246,7 +246,7 @@ def fake_game(index=0, *, length=6, outcome=1, run=2):
     analysis[:,2:4] = 1
     return {"run_id":run, "game_index":index, "white":"cataclysm", "black":"astra", "binary":bytes(32),
             "split":"train", "opening_key":f"train:{index}",
-            "rules":"fixture", "castling_transit_anomalies":[], "trajectory_key":hashlib.sha256(str(index).encode()).digest(),
+            "trajectory_key":hashlib.sha256(str(index).encode()).digest(),
             "white_value":outcome, "analysis":analysis, "in_check":np.zeros(length,bool),
             "nnue_features":ids, "nnue_baselines":baseline}
 
@@ -319,17 +319,6 @@ def test_zero_network_validation_is_exactly_the_handwritten_control():
     np.testing.assert_array_equal(nnue.Model(bytes(nnue.MODEL_BYTES)).scores(ids,baseline,sides), expected)
 
 
-def test_castling_affected_games_are_excluded_without_relabeling(monkeypatch, tmp_path):
-    good, affected = fake_game(1), fake_game(2)
-    affected["castling_transit_anomalies"] = [4]
-    def stream(*a, **kw): yield from [good, affected]
-    monkeypatch.setattr(nnue, "games", stream)
-    data = nnue.dataset(tmp_path, runs=[2], split="train")
-    assert data.provenance["retained_games"] == 1
-    assert data.provenance["excluded_castling_games"] == [(2,2)]
-    assert affected["white_value"] == 1
-
-
 def training_fixture(path, split, **kw):
     for index, value in [(1,1), (2,-1)]:
         game = fake_game(index, outcome=value)
@@ -383,7 +372,7 @@ def test_early_stop_restores_best_weights_optimizer_and_sampler(monkeypatch, tmp
         np.testing.assert_array_equal(tensor.numpy(),nnue.optimizer_state(expected.optimizer)[key].numpy())
 
 
-def test_historical_nnue_initialization_is_explicit(tmp_path):
+def test_incompatible_nnue_checkpoint_is_rejected(tmp_path):
     from tinygrad.nn.state import safe_load, safe_load_metadata, safe_save
     import json
     path = tmp_path/"old.safetensors"
@@ -394,5 +383,4 @@ def test_historical_nnue_initialization_is_explicit(tmp_path):
     old = tmp_path/"historical.safetensors"
     safe_save(safe_load(str(path)),str(old),metadata={"nnue":json.dumps(info)})
     with pytest.raises(ValueError,match="rules/format"): nnue.load(old)
-    restored, provenance = nnue.load(old,allow_historical=True)
-    assert restored.export() == NNUE_CONTROL and provenance["rules"] == info["rules"]
+    with pytest.raises(ValueError,match="rules/format"): nnue.load(old, training=True)

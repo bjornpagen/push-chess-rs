@@ -1,16 +1,9 @@
 //! Fixed-node behavioral controls for mechanism-only refactors. These are
 //! not strength tests. Change a fingerprint only for an intentional strategy
 //! change, never to make a purported behavior-preserving optimization pass.
-use push_chess::core::rules::Rules;
 use push_chess::core::{position::Position, types::*};
 use push_chess::engines::ENGINE_REGISTRY;
 use push_chess::selfplay::State;
-
-// Keep the pre-cutover mechanism gate: v2 intentionally changes legal play
-// and hash namespaces. New-rules correctness is covered by the rules tests.
-fn historical_state() -> State {
-    State::from_fen_with_rules(&State::default().position().to_fen(), Rules::HistoryV1).unwrap()
-}
 
 fn mix(hash: &mut u64, word: u64) {
     for byte in word.to_le_bytes() {
@@ -26,15 +19,12 @@ fn fixed_node_search_fingerprints() {
         "r3k2r/8/8/3pP3/8/8/8/R3K2R w KQkq d6 0 1",
         "7k/8/8/8/3p4/8/4P3/K7 b - - 0 1",
     ]
-    .map(|fen| {
-        Position::try_from_fen_with_rules(fen, Rules::HistoryV1)
-            .unwrap_or_else(|error| panic!("{fen}: {error}"))
-    })
+    .map(|fen| Position::try_from_fen(fen).unwrap_or_else(|error| panic!("{fen}: {error}")))
     .into();
-    let mut state = historical_state();
+    let mut state = State::default();
     for ply in 0..64 {
         if state.white_value().is_some() {
-            state = historical_state();
+            state = State::default();
         }
         if ply % 9 == 0 {
             positions.push(state.position().clone());

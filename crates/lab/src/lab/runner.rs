@@ -150,7 +150,6 @@ fn play(
     black_engine.new_game(Color::Black, seed);
     let mut pos = start_position();
     let mut game = Trajectory {
-        rules: pos.rules,
         index: pair * 2 + usize::from(swapped),
         pair: Some(pair),
         white: white.clone(),

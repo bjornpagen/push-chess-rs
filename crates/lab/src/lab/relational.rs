@@ -57,7 +57,7 @@ fn castles() -> [(u8, SideId, WingId); 4] {
         (8, Side::Black.id(), Wing::QueenSide.id()),
     ]
 }
-pub(super) fn config(frame: &ReadFrame<'_, TrainingGround>, run: &Run<'_>) -> Result<RunConfig> {
+pub(super) fn config(frame: &ReadFrame<'_, TrainingGround>, run: &Run) -> Result<RunConfig> {
     let mut entrants = Vec::new();
     for e in frame.scan_facts::<Entrant>()? {
         let e = e?;
@@ -107,14 +107,12 @@ pub(super) fn write_config(
     roster: &Roster,
     binary: [u8; 32],
     now: u64,
-    rules: super::Rules,
 ) -> Result<()> {
     insert(
         draft,
         &Run {
             id,
             binary,
-            rules: rules.name(),
             started_us: now,
             pairs: c.pairs as u64,
             workers: c.workers as u64,
@@ -341,7 +339,7 @@ pub(super) fn write_game(
     if (&g.white, &g.black) != (white, black) {
         return Err("wrong scheduled players".into());
     }
-    let mut pos = Board::try_from_fen_with_rules(&g.initial_fen, g.rules)?;
+    let mut pos = Board::try_from_fen(&g.initial_fen)?;
     let setup = write_setup(draft, &pos)?;
     let mut digest = Sha256::new();
     digest.update(g.initial_fen.as_bytes());
@@ -656,9 +654,6 @@ pub(super) fn read_game(
         (first.name, second.name)
     };
     let mut pos = setup_board(frame, g.setup)?;
-    let run = frame.get(RunById { id: g.run })?.ok_or("missing run")?;
-    pos.rules = super::Rules::parse(run.rules)?;
-    pos.compute_zobrist();
     let initial_fen = pos.to_fen();
     let mut records = Vec::new();
     let mut legal = Vec::new();
@@ -806,7 +801,6 @@ pub(super) fn read_game(
         game: g.index,
     })?;
     Ok(Trajectory {
-        rules: pos.rules,
         index: g.index.try_into()?,
         pair: Some(g.pair.try_into()?),
         white: white.into(),

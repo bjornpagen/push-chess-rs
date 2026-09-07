@@ -55,7 +55,7 @@ def main(argv=None):
     residual.add_argument("--runs", nargs="+", type=int, required=True, help="explicit sealed source run IDs")
     residual.add_argument("--output", type=Path, required=True, help="new candidate checkpoint, never the engine control")
     residual.add_argument("--resume", type=Path)
-    residual.add_argument("--init", type=Path, help="initialize weights, resetting optimizer and sampler; allows historical NNUE")
+    residual.add_argument("--init", type=Path, help="initialize compatible weights, resetting optimizer and sampler")
     residual.add_argument("--learning-rate", type=float)
     residual.add_argument("--no-jit", action="store_true")
     residual.add_argument("--device", choices=("CPU","METAL"), help="explicit training backend; default is DEV (normally METAL)")

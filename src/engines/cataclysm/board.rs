@@ -156,7 +156,6 @@ impl Board<Handwritten> {
 impl<R: Residual> Board<R> {
     pub fn with_residual(pos: &Position, net: R) -> Self {
         let mut view = Position::empty();
-        view.rules = pos.rules;
         view.board = pos.board;
         view.side_to_move = pos.side_to_move;
         view.castling_rights = pos.castling_rights;
@@ -496,7 +495,7 @@ impl<R: Residual> Board<R> {
                                 && spaces
                                     .iter()
                                     .all(|&s| self.pos.board[s as usize].is_empty())
-                                && self.pos.castle_path_safe(from, transit, to)
+                                && self.pos.castle_path_safe(from, transit)
                             {
                                 self.append(
                                     out,

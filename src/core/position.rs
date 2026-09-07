@@ -81,7 +81,6 @@ fn piece_to_char(p: Piece) -> char {
 
 #[derive(Clone)]
 pub struct Position {
-    pub rules: super::rules::Rules,
     pub board: [Piece; 64],
     pub side_to_move: Color,
     pub castling_rights: u8,
@@ -96,7 +95,6 @@ pub struct Position {
 impl Default for Position {
     fn default() -> Self {
         Self {
-            rules: super::rules::Rules::default(),
             board: [Piece::default(); 64],
             side_to_move: Color::White,
             castling_rights: 0x0F,
@@ -115,7 +113,6 @@ impl Position {
     /// For callers that construct a rules position explicitly.
     pub fn empty() -> Self {
         Self {
-            rules: super::rules::Rules::default(),
             board: [Piece::default(); 64],
             side_to_move: Color::White,
             castling_rights: 0,
@@ -285,7 +282,7 @@ impl Position {
 
     pub fn compute_zobrist(&mut self) {
         let z = zobrist_tables();
-        self.zobrist = self.rules.hash_salt();
+        self.zobrist = super::rules::POSITION_HASH_SALT;
         for sq in 0..64usize {
             if !self.board[sq].is_empty() {
                 let c = self.board[sq].color as usize;
@@ -545,7 +542,6 @@ impl Position {
     /// A cheap search cursor: copies current board/metadata, not undo history.
     pub fn without_history(&self) -> Self {
         Self {
-            rules: self.rules,
             board: self.board,
             side_to_move: self.side_to_move,
             castling_rights: self.castling_rights,
@@ -565,14 +561,11 @@ impl Position {
     /// Castling's intermediate state, before the rook moves. Knight capture
     /// queries require a real target and see blockers on their full push route.
     /// Final safety is checked after the complete castle, including the rook.
-    pub fn castle_path_safe(&self, from: Square, transit: Square, to: Square) -> bool {
+    pub fn castle_path_safe(&self, from: Square, transit: Square) -> bool {
         let us = self.side_to_move;
         let them = opponent(us);
         if self.is_attacked_by(from, them) {
             return false;
-        }
-        if self.rules == super::rules::Rules::HistoryV1 {
-            return !self.is_attacked_by(transit, them) && !self.is_attacked_by(to, them);
         }
         self.king_step_safe(from, transit)
     }

@@ -364,7 +364,7 @@ fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut impl MoveSi
         let g_sq = make_square(castle_rank, 6);
         if pos.board[f_sq as usize].is_empty()
             && pos.board[g_sq as usize].is_empty()
-            && pos.castle_path_safe(from, f_sq, g_sq)
+            && pos.castle_path_safe(from, f_sq)
         {
             out.emit(
                 Move {
@@ -393,7 +393,7 @@ fn gen_king_moves(pos: &Position, from: Square, us: Color, out: &mut impl MoveSi
         if pos.board[d_sq as usize].is_empty()
             && pos.board[c_sq as usize].is_empty()
             && pos.board[b_sq as usize].is_empty()
-            && pos.castle_path_safe(from, d_sq, c_sq)
+            && pos.castle_path_safe(from, d_sq)
         {
             out.emit(
                 Move {

@@ -27,8 +27,10 @@ neural collector must add typed policy facts to bumbledb. The current research
 loop focuses on classical search plus NNUE, not replacing search with a purely
 neural player. No neural training starts automatically with a tournament.
 
-The optional full-model teacher baseline remains available after the tournament
-releases bumbledb's single-process ownership:
+The optional full-model teacher baseline requires an audited, sealed training
+corpus. The old-rules data was purged; the 256 remaining games are evaluation-only,
+so there is currently no training data. No training run is authorized.
+After a future training corpus exists and its writer releases ownership:
 
 ```sh
 uv run pushzero pretrain --db data/corpus --output models/student.safetensors \
@@ -46,10 +48,11 @@ This is the intended neural component of the classical-engine research loop:
 the existing 768-feature, 32-hidden-unit Cataclysm residual, with its fixed
 handwritten evaluation and search left intact. It is not a policy network.
 
-After the tournament has stopped and the corpus has passed `lab verify`:
+After a future corpus run has stopped and passed `lab verify`, replace
+`CORPUS_RUN_ID` with that run's ID (the purged Run 2 is not available):
 
 ```sh
-uv run pushzero nnue train --db data/corpus --runs 2 \
+uv run pushzero nnue train --db data/corpus --runs CORPUS_RUN_ID \
   --output models/residual-candidate.safetensors --steps 1000 --batch-size 256
 uv run pushzero nnue export models/residual-candidate.safetensors \
   --output models/residual-candidate.bin
@@ -140,15 +143,16 @@ step, and rejects changed sample digests or batch size. `--init CHECKPOINT`
 explicitly starts a fresh refinement from weights only; it resets optimizer and
 sampler and optionally accepts `--learning-rate`. Use `--init` for older
 checkpoints without a sampler or for an intentional change of data/learning rate.
-Historical v1 NNUE initialization is explicit; unknown rules are rejected.
+Only checkpoints matching the current model/rules contract can initialize or
+resume training. The archived r2 checkpoint is no longer accepted by the current
+trainer; its unchanged exported inference weights remain available as a control.
 
-Core, lab and Python now share `push-chess-history-v2`. Saved v1 corpus games
-still replay with the old rules and unchanged hashes. Their known castling
-transit anomalies are exposed on typed pages; NNUE training excludes entire
-affected games and records their run/game references, without modifying results.
-Other v1 terminal labels retain their source identity: they are historical
-evidence, not re-certified v2 outcomes. Full policy training fails closed on
-non-current rules rather than mixing incompatible legal-action targets.
+Core, lab and Python implement one corrected ruleset. The normalized database
+has no per-run rules column, and the active engine has no historical replay
+switches or special legacy sampling path. Old schema stores fail to open rather
+than being silently interpreted. Checkpoint rules/encoding identities remain
+as compatibility guards, not selectable game modes. See
+[the verified corpus cutover](../docs/corpus-cutover.md).
 
 Export produces the separate 49,280-byte i16 candidate. It does **not** install
 the network, edit the embedded control, or promote it. Require fresh paired

@@ -1,5 +1,10 @@
 # Retain query work across games
 
+> Historical record: old-rules Runs 1–4 and their training data were purged in
+> the [single-rules corpus cutover](corpus-cutover.md). Only Runs 5–6 remain.
+> Old replay commands and training reproductions below require data no longer
+> present in the live corpus; they are not current operating instructions.
+
 The first full Round 2 replay audit exposed an application-level bottleneck.
 A one-second macOS sample of its release process on 2026-09-07 observed
 701 of 759 main-thread samples (92.4%) in the two piece-delta queries inside

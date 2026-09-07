@@ -200,7 +200,7 @@ def dataset(path, *, runs, split, max_games=10000, positions_per_game=16, seed=1
     if not 1 <= max_games <= 100000 or not 1 <= positions_per_game <= 64:
         raise ValueError("bounded positive game/position limits required")
     rng, retained, seen, scanned = np.random.default_rng(seed), [], 0, 0
-    duplicates, trajectories, identities, excluded = 0, set(), set(), []
+    duplicates, trajectories, identities = 0, set(), set()
     stream = games(path, split, nnue=True, runs=runs)
     try:
         for game in stream:
@@ -208,11 +208,6 @@ def dataset(path, *, runs, split, max_games=10000, positions_per_game=16, seed=1
             if game["split"] != split: raise ValueError("corpus split mismatch")
             scanned += 1
             if game["white_value"] is None: continue
-            # Preserve the historical facts, but do not teach from outcomes of
-            # games known to have crossed a newly-illegal castling transit.
-            if game["castling_transit_anomalies"]:
-                excluded.append((game["run_id"], game["game_index"]))
-                continue
             if game["trajectory_key"] in trajectories:
                 duplicates += 1
                 continue
@@ -221,7 +216,7 @@ def dataset(path, *, runs, split, max_games=10000, positions_per_game=16, seed=1
             eligible = np.flatnonzero((analysis[:, 2] == 1) & (analysis[:, 3] == 1)
                 & (np.abs(analysis[:, 1]) < 28000) & ~game["in_check"])
             if not len(eligible): continue
-            identities.add((game["run_id"], game["white"], game["black"], game["binary"].hex(), game["rules"]))
+            identities.add((game["run_id"], game["white"], game["black"], game["binary"].hex()))
             selected = np.sort(rng.choice(eligible, size=min(len(eligible), positions_per_game), replace=False))
             sides = analysis[selected, 0].astype(np.float32)
             target = ((1 - 2*sides) * game["white_value"] + 1) / 2
@@ -245,7 +240,6 @@ def dataset(path, *, runs, split, max_games=10000, positions_per_game=16, seed=1
             "retained_positions": len(ids), "duplicate_trajectories": duplicates, "seed": seed,
             "max_games": max_games, "positions_per_game": positions_per_game,
             "sample_sha256": digest.hexdigest(), "identities": sorted(identities),
-            "excluded_castling_games": excluded,
             "targets": "terminal expected score; completed non-check roots; abs(search score)<28000"}
     return Dataset(ids, baselines, sides, targets, offsets, info, frozenset(row[5] for row in retained))
 
@@ -278,11 +272,9 @@ def save(path, learner, metadata):
     return info
 
 
-def load(path, *, training=False, jit=True, device=None, allow_historical=False):
+def load(path, *, training=False, jit=True, device=None):
     info = json.loads(safe_load_metadata(str(path))[2]["__metadata__"]["nnue"])
-    compatible = info.get("rules") == RULES_VERSION or (allow_historical and
-        info.get("rules") in ("push-chess-history-v1", "push-chess-v1-history-castling"))
-    if info.get("format") != FORMAT or not compatible:
+    if info.get("format") != FORMAT or info.get("rules") != RULES_VERSION:
         raise ValueError("NNUE checkpoint rules/format mismatch")
     if info.get("tinygrad") != importlib.metadata.version("tinygrad"):
         raise ValueError("NNUE checkpoint tinygrad differs from pinned runtime")
@@ -341,7 +333,7 @@ def train(db, output, *, runs, steps=1000, batch_size=256, max_games=10000, vali
             raise ValueError("resume dataset/sampler mismatch; use init for a fresh refinement")
         rng.bit_generator.state = prior["sampler_state"]
     else:
-        model = load(init, device=device, allow_historical=True)[0] if init else Model(device=device)
+        model = load(init, device=device)[0] if init else Model(device=device)
         learner = Learner(model, lr=learning_rate if learning_rate is not None else 1e-3, jit=jit)
     before = evaluate(learner.model, validation, learner.score_scale)
     control = evaluate(Model(device=device), validation, learner.score_scale)

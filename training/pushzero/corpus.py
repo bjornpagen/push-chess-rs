@@ -1,6 +1,6 @@
 """Typed complete-game pages from bumbledb, the only durable game source."""
 import numpy as np
-from ._native import CorpusReader, State, RULES_VERSION
+from ._native import CorpusReader, State
 from .replay import GameLog, CompactSample, ObservationCache, Replay
 
 
@@ -17,10 +17,6 @@ def games(path, split="train", page_size=8, *, nnue=False, runs=None):
 
 
 def samples(game, cache=None):
-    # The full policy model has no rules input. Do not mix historical policy
-    # targets into a current-rules checkpoint; NNUE has a separate audited path.
-    if game["rules"] != RULES_VERSION:
-        raise ValueError("policy training requires current-rules games")
     cache = ObservationCache(0) if cache is None else cache
     log = GameLog(game["initial_fen"], tuple(map(int, game["moves"])))
     state, result = State(log.initial_fen), []

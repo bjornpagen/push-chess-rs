@@ -54,12 +54,14 @@ The current learning loop improves Cataclysm's small residual without replacing
 classical search. One NNUE interface selects the appropriate implementation:
 native incremental inference in search, tinygrad differentiation for training.
 The deployed model owns the format and feature contract. Training reads only
-explicit, sealed bumbledb source runs:
+explicit, sealed bumbledb source runs. Replace `CORPUS_RUN_ID` below with a new,
+audited training run ID; the old-rules corpus has been purged and the remaining
+256 games are evaluation-only ([cutover](docs/corpus-cutover.md)):
 
 ```sh
 uv sync --group dev
 uv run maturin develop --release
-uv run pushzero nnue train --db data/corpus --runs 2 \
+uv run pushzero nnue train --db data/corpus --runs CORPUS_RUN_ID \
   --output models/residual-candidate.safetensors --steps 1000 --batch-size 256
 uv run pushzero nnue export models/residual-candidate.safetensors \
   --output models/residual-candidate.bin

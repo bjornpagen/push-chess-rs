@@ -20,7 +20,7 @@ bumbledb::schema! {
         Win {value:1}, Draw {value:0}, Loss {value:-1},
     };
     relation Run {
-        id:u64 as RunId, binary:bytes<32>, rules:str, started_us:u64,
+        id:u64 as RunId, binary:bytes<32>, started_us:u64,
         pairs:u64, workers:u64, max_plies:u64, opening_plies:u64, seed:u64,
         purpose:u64 as PurposeId, budget:u64 as BudgetKindId,
         max_seconds:u64, max_bytes:u64,

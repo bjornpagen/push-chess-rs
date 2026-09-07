@@ -50,8 +50,8 @@ dependencies = [
 
 [[package]]
 name = "bumbledb"
-version = "0.20.3"
-source = "git+https://github.com/bjornpagen/bumbledb?rev=3ed3303eb226de6c98955ab75c296887eaf7704b#3ed3303eb226de6c98955ab75c296887eaf7704b"
+version = "1.0.1"
+source = "git+https://github.com/bjornpagen/bumbledb?rev=5e83ee60c4e5d88e8ca395daa3de4d92a0c03186#5e83ee60c4e5d88e8ca395daa3de4d92a0c03186"
 dependencies = [
  "blake3",
  "bumbledb-macros",
@@ -62,24 +62,24 @@ dependencies = [
 
 [[package]]
 name = "bumbledb-macros"
-version = "0.20.3"
-source = "git+https://github.com/bjornpagen/bumbledb?rev=3ed3303eb226de6c98955ab75c296887eaf7704b#3ed3303eb226de6c98955ab75c296887eaf7704b"
+version = "1.0.1"
+source = "git+https://github.com/bjornpagen/bumbledb?rev=5e83ee60c4e5d88e8ca395daa3de4d92a0c03186#5e83ee60c4e5d88e8ca395daa3de4d92a0c03186"
 dependencies = [
  "bumbledb-theory",
 ]
 
 [[package]]
 name = "bumbledb-query-macros"
-version = "0.20.3"
-source = "git+https://github.com/bjornpagen/bumbledb?rev=3ed3303eb226de6c98955ab75c296887eaf7704b#3ed3303eb226de6c98955ab75c296887eaf7704b"
+version = "1.0.1"
+source = "git+https://github.com/bjornpagen/bumbledb?rev=5e83ee60c4e5d88e8ca395daa3de4d92a0c03186#5e83ee60c4e5d88e8ca395daa3de4d92a0c03186"
 dependencies = [
  "bumbledb-theory",
 ]
 
 [[package]]
 name = "bumbledb-theory"
-version = "0.20.3"
-source = "git+https://github.com/bjornpagen/bumbledb?rev=3ed3303eb226de6c98955ab75c296887eaf7704b#3ed3303eb226de6c98955ab75c296887eaf7704b"
+version = "1.0.1"
+source = "git+https://github.com/bjornpagen/bumbledb?rev=5e83ee60c4e5d88e8ca395daa3de4d92a0c03186#5e83ee60c4e5d88e8ca395daa3de4d92a0c03186"
 dependencies = [
  "uuid",
 ]

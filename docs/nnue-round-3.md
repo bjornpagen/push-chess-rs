@@ -1,5 +1,10 @@
 # Bounded refinement of the existing NNUE
 
+> Historical record: old-rules Runs 1–4 and their training data were purged in
+> the [single-rules corpus cutover](corpus-cutover.md). Only Runs 5–6 remain.
+> Old replay commands and training reproductions below require data no longer
+> present in the live corpus; they are not current operating instructions.
+
 ## Authorized scope and fixed comparison plan — 2026-09-07
 
 The user authorized NNUE improvement, cleanup/bug fixes, committing and pushing

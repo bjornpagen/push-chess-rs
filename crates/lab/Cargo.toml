@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 push-chess = { path = "../.." }
-bumbledb = { git = "https://github.com/bjornpagen/bumbledb", rev = "3ed3303eb226de6c98955ab75c296887eaf7704b" }
+bumbledb = { git = "https://github.com/bjornpagen/bumbledb", rev = "5e83ee60c4e5d88e8ca395daa3de4d92a0c03186" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

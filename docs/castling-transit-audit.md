@@ -1,5 +1,10 @@
 # Castling through a knight-controlled transit square
 
+> Historical record: old-rules Runs 1–4 and their training data were purged in
+> the [single-rules corpus cutover](corpus-cutover.md). Only Runs 5–6 remain.
+> Old replay commands and training reproductions below require data no longer
+> present in the live corpus; they are not current operating instructions.
+
 ## Correction — 2026-09-07
 
 New play now uses `push-chess-history-v2`, shared by core, lab and Python.
